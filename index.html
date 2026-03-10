@@ -1130,7 +1130,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.5</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.6</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1459,6 +1459,9 @@ ${state.players.length < 4 ? `
     </div>`).join('')}
   </div>
 `}
+<input type="hidden" id="modal-warning-confirmed-flag" value="0" />
+<div id="modal-error" style="display:none;background:#e53e3e;color:#fff;padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:13px;"></div>
+<div id="modal-warning" style="display:none;background:#d97706;color:#fff;padding:10px 14px;border-radius:8px;margin-bottom:12px;font-size:13px;"></div>
 <div class="modal-actions">
   <button class="btn btn-secondary" onclick="closeModal()">Cancelar</button>
   <button class="btn btn-primary" onclick="saveTournament()">Crear torneo</button>
@@ -1530,8 +1533,18 @@ function getPartnerMode() {
 async function saveTournament() {
   const name = document.getElementById('t-name').value.trim();
   const date = document.getElementById('t-date').value;
-  if (!name || !date) { msg('Nombre y fecha son obligatorios', 'error'); return; }
-  if (selectedPlayers.size < 4) { msg('Añade al menos 4 jugadores', 'error'); return; }
+
+  const modalError = document.getElementById('modal-error');
+  const modalWarning = document.getElementById('modal-warning');
+  if (modalError) { modalError.style.display = 'none'; modalError.textContent = ''; }
+  if (modalWarning) { modalWarning.style.display = 'none'; modalWarning.textContent = ''; }
+
+  function showModalError(text) {
+    if (modalError) { modalError.textContent = text; modalError.style.display = 'block'; modalError.scrollIntoView({behavior:'smooth',block:'nearest'}); }
+  }
+
+  if (!name || !date) { showModalError('Nombre y fecha son obligatorios'); return; }
+  if (selectedPlayers.size < 4) { showModalError('Añade al menos 4 jugadores'); return; }
 
   const partnerMode = getPartnerMode();
   const numPlayers = selectedPlayers.size;
@@ -1541,28 +1554,27 @@ async function saveTournament() {
 
   // VALIDACIÓN 1: Parejas fijas con número impar de jugadores — bloqueante
   if (isFixed && numPlayers % 2 !== 0) {
-    msg(`Con parejas fijas necesitas un número par de jugadores. Tienes ${numPlayers} (impar). Añade o quita un jugador.`, 'error');
+    showModalError(`Con parejas fijas necesitas un número par de jugadores. Tienes ${numPlayers} (impar). Añade o quita un jugador.`);
     return;
   }
 
-  // VALIDACIÓN 2: Calcular si alguien jugará partidos extra — aviso con confirmación
+  // VALIDACIÓN 2: Una pareja jugará partido(s) extra — aviso con confirmación dentro del modal
   if (isFixed) {
     const numPairs = numPlayers / 2;
-    // Total match slots needed = numPairs * matchesPerPlayer (each pair needs this many games)
-    // Each match uses 2 pairs, so total matches = numPairs * matchesPerPlayer / 2
-    // But with odd number of pairs, each round one pair sits out
-    // Check if total games distribute unevenly
-    const totalMatchSlots = numPairs * matchesPerPlayer; // total "pair-games" needed
+    const totalMatchSlots = numPairs * matchesPerPlayer;
     if (totalMatchSlots % 2 !== 0) {
-      // Odd total means one pair must play one extra game
-      const extra = Math.ceil(totalMatchSlots / 2) * 2 - totalMatchSlots;
-      const extraGames = extra;
-      const confirmed = confirm(
-        `⚠️ Aviso: Con ${numPairs} parejas y ${matchesPerPlayer} partidos mínimos, ` +
-        `${extraGames === 0 ? 'alguna pareja' : 'una pareja'} jugará ${matchesPerPlayer + 1} partidos en lugar de ${matchesPerPlayer}.\n\n` +
-        `¿Quieres continuar?`
-      );
-      if (!confirmed) return;
+      // Check if user already confirmed (second click after seeing warning)
+      const confirmed = document.getElementById('modal-warning-confirmed-flag')?.value === '1';
+      if (!confirmed) {
+        if (modalWarning) {
+          modalWarning.innerHTML = `⚠️ Con ${numPairs} parejas y ${matchesPerPlayer} partidos mínimos, una pareja jugará ${matchesPerPlayer + 1} partidos en lugar de ${matchesPerPlayer}.<br><br>
+          <button class="btn btn-primary" style="margin-right:8px" onclick="document.getElementById('modal-warning').innerHTML='';document.getElementById('modal-warning').style.display='none';document.getElementById('modal-warning-confirmed-flag').value='1';saveTournament()">Sí, continuar</button>
+          <button class="btn btn-secondary" onclick="document.getElementById('modal-warning').style.display='none'">Cancelar</button>`;
+          modalWarning.style.display = 'block';
+          modalWarning.scrollIntoView({behavior:'smooth', block:'nearest'});
+        }
+        return;
+      }
     }
   }
 
