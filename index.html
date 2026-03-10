@@ -1130,7 +1130,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.4</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.5</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1533,19 +1533,51 @@ async function saveTournament() {
   if (!name || !date) { msg('Nombre y fecha son obligatorios', 'error'); return; }
   if (selectedPlayers.size < 4) { msg('Añade al menos 4 jugadores', 'error'); return; }
 
+  const partnerMode = getPartnerMode();
+  const numPlayers = selectedPlayers.size;
+  const matchesPerPlayer = parseInt(document.getElementById('t-matches')?.value) || 3;
+  const courts = parseInt(document.getElementById('t-courts')?.value) || 4;
+  const isFixed = partnerMode.startsWith('fixed');
+
+  // VALIDACIÓN 1: Parejas fijas con número impar de jugadores — bloqueante
+  if (isFixed && numPlayers % 2 !== 0) {
+    msg(`Con parejas fijas necesitas un número par de jugadores. Tienes ${numPlayers} (impar). Añade o quita un jugador.`, 'error');
+    return;
+  }
+
+  // VALIDACIÓN 2: Calcular si alguien jugará partidos extra — aviso con confirmación
+  if (isFixed) {
+    const numPairs = numPlayers / 2;
+    // Total match slots needed = numPairs * matchesPerPlayer (each pair needs this many games)
+    // Each match uses 2 pairs, so total matches = numPairs * matchesPerPlayer / 2
+    // But with odd number of pairs, each round one pair sits out
+    // Check if total games distribute unevenly
+    const totalMatchSlots = numPairs * matchesPerPlayer; // total "pair-games" needed
+    if (totalMatchSlots % 2 !== 0) {
+      // Odd total means one pair must play one extra game
+      const extra = Math.ceil(totalMatchSlots / 2) * 2 - totalMatchSlots;
+      const extraGames = extra;
+      const confirmed = confirm(
+        `⚠️ Aviso: Con ${numPairs} parejas y ${matchesPerPlayer} partidos mínimos, ` +
+        `${extraGames === 0 ? 'alguna pareja' : 'una pareja'} jugará ${matchesPerPlayer + 1} partidos en lugar de ${matchesPerPlayer}.\n\n` +
+        `¿Quieres continuar?`
+      );
+      if (!confirmed) return;
+    }
+  }
+
   const btn = document.querySelector('.modal .btn-primary');
   if (btn) { btn.textContent = 'Creando...'; btn.disabled = true; }
 
   try {
-    const partnerMode = getPartnerMode();
     console.log('Partner mode:', partnerMode);
 
     const tData = {
       name,
       scheduled_date: date,
       location: document.getElementById('t-location')?.value.trim() || null,
-      matches_per_player: parseInt(document.getElementById('t-matches')?.value) || 3,
-      courts: parseInt(document.getElementById('t-courts')?.value) || 4,
+      matches_per_player: matchesPerPlayer,
+      courts,
       minutes_per_match: parseInt(document.getElementById('t-time')?.value) || 30,
       game_format: parseInt(document.getElementById('t-format')?.value) || 6,
       start_time: document.getElementById('t-starttime')?.value || '10:00',
