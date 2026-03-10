@@ -836,107 +836,77 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
   let round = 1;
   let globalStuck = 0;
   const maxCourts = courts || 4;
+  // Track how many rounds each pair has rested (to prioritize them)
+  const pairRestCount = {};
+  if (isFixed) fixedPairs.forEach((_, i) => pairRestCount[i] = 0);
 
-  while (globalStuck < 200) {
+  while (globalStuck < 300) {
     if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
 
-    // Players who still need more matches — allow slight overage for pairs
-    const needsMore = p => playCount[p.id] < matchesPerPlayer;
-    // For fixed mode, a pair is available if at least one member needs more games
-    const pairNeedsMore = pair => pair.some(p => needsMore(p));
+    // Get pairs that still need to play
+    let activePairs;
+    if (isFixed) {
+      activePairs = fixedPairs
+        .map((pair, i) => ({ pair, i, plays: Math.min(playCount[pair[0].id], playCount[pair[1].id]), rests: pairRestCount[i] }))
+        .filter(({ plays }) => plays < matchesPerPlayer)
+        .sort((a, b) => a.plays - b.plays || b.rests - a.rests); // least played + most rested first
+    } else {
+      const pool = [...players]
+        .filter(p => playCount[p.id] < matchesPerPlayer)
+        .sort((a, b) => playCount[a.id] - playCount[b.id] || Math.random() - 0.5);
+      if (pool.length < 4) break;
 
-    const available = [...players]
-      .filter(p => playCount[p.id] < matchesPerPlayer)
-      .sort((a, b) => playCount[a.id] - playCount[b.id] || Math.random() - 0.5);
-
-    if (available.length < 4) {
-      // In fixed mode, check if any pair still needs games even if partner is done
-      if (isFixed) {
-        const needyPairs = fixedPairs.filter(pairNeedsMore);
-        if (needyPairs.length < 2) break;
-        // Allow partner to play one extra to cover their partner
-        // Expand available to include partners of needy players
-        const needyIds = new Set(needyPairs.flat().map(p => p.id));
-        const expanded = players.filter(p => needyIds.has(p.id));
-        if (expanded.length < 4) break;
-        available.push(...players.filter(p => !needsMore(p) && needyIds.has(p.id)));
-      } else {
-        break;
-      }
-    }
-
-    // How many matches can we fit this round?
-    const availablePairs = isFixed
-      ? fixedPairs.filter(([a, b]) => available.find(p => p.id === a.id) && available.find(p => p.id === b.id))
-      : null;
-
-    const pairCount = isFixed ? availablePairs.length : Math.floor(available.length / 2);
-    const matchesThisRound = Math.min(maxCourts, Math.floor(pairCount / 2) * 1 || 0);
-
-    if (matchesThisRound === 0) { globalStuck++; continue; }
-
-    // Build all possible pairs from available players
-    function buildRoundPairs(pool) {
-      if (isFixed) {
-        return fixedPairs
-          .filter(([a, b]) => pool.find(p => p.id === a.id) && pool.find(p => p.id === b.id))
-          .sort((a, b) => playCount[a[0].id] + playCount[a[1].id] - playCount[b[0].id] - playCount[b[1].id]);
-      }
-      const sorted = partnerMode === 'rotating_pure'
-        ? [...pool].sort((a, b) => b.level - a.level)
-        : partnerMode === 'rotating_mixed'
-          ? [...pool].sort((a, b) => b.level - a.level)
-          : shuffle(pool);
-
-      const pairs = [];
-      const used = new Set();
-
-      if (partnerMode === 'rotating_mixed') {
+      // Build pairs from pool
+      activePairs = [];
+      if (partnerMode === 'rotating_pure') {
+        const sorted = [...pool].sort((a, b) => b.level - a.level);
+        for (let i = 0; i + 1 < sorted.length; i += 2)
+          activePairs.push({ pair: [sorted[i], sorted[i+1]], plays: 0, rests: 0 });
+      } else if (partnerMode === 'rotating_mixed') {
+        const sorted = [...pool].sort((a, b) => b.level - a.level);
         let hi = 0, lo = sorted.length - 1;
+        const used = new Set();
         while (hi < lo) {
           while (used.has(hi)) hi++;
           while (used.has(lo)) lo--;
           if (hi >= lo) break;
-          // Prefer not repeating partner
-          pairs.push([sorted[hi], sorted[lo]]);
-          used.add(hi); used.add(lo);
-          hi++; lo--;
+          activePairs.push({ pair: [sorted[hi], sorted[lo]], plays: 0, rests: 0 });
+          used.add(hi); used.add(lo); hi++; lo--;
         }
       } else if (genderMode === 'mixed') {
         const females = pool.filter(p => p.gender === 'female');
         const males = pool.filter(p => p.gender !== 'female');
         const usedM = new Set(), usedF = new Set();
         females.forEach(f => {
-          // Pick male with fewest partner repeats
-          const m = males
-            .filter(m => !usedM.has(m.id))
-            .sort((a, b) => (partnerCount[f.id][a.id]||0) - (partnerCount[f.id][b.id]||0))[0];
-          if (m) { pairs.push([f, m]); usedF.add(f.id); usedM.add(m.id); }
+          const m = males.filter(m => !usedM.has(m.id)).sort((a,b) => (partnerCount[f.id][a.id]||0)-(partnerCount[f.id][b.id]||0))[0];
+          if (m) { activePairs.push({ pair: [f, m], plays: 0, rests: 0 }); usedF.add(f.id); usedM.add(m.id); }
         });
         const rem = pool.filter(p => !usedF.has(p.id) && !usedM.has(p.id));
-        for (let i = 0; i + 1 < rem.length; i += 2) pairs.push([rem[i], rem[i+1]]);
+        for (let i = 0; i + 1 < rem.length; i += 2)
+          activePairs.push({ pair: [rem[i], rem[i+1]], plays: 0, rests: 0 });
       } else {
-        for (let i = 0; i + 1 < sorted.length; i += 2) pairs.push([sorted[i], sorted[i+1]]);
+        const s = shuffle(pool);
+        for (let i = 0; i + 1 < s.length; i += 2)
+          activePairs.push({ pair: [s[i], s[i+1]], plays: 0, rests: 0 });
       }
-      return pairs;
     }
 
-    // Try to fill exactly matchesThisRound courts
+    if (activePairs.length < 2) { globalStuck++; continue; }
+
+    // Greedy match assignment: pair activePairs into matches filling courts
     const roundMatches = [];
-    const usedPlayerIds = new Set();
+    const usedPairIdx = new Set();
 
-    const pairs = buildRoundPairs(available);
+    for (let i = 0; i < activePairs.length && roundMatches.length < maxCourts; i++) {
+      if (usedPairIdx.has(i)) continue;
+      const { pair: team1 } = activePairs[i];
 
-    // Greedily assign matches to courts - fill ALL available courts
-    for (const team1 of pairs) {
-      if (roundMatches.length >= maxCourts) break;
-      if (team1.some(p => usedPlayerIds.has(p.id))) continue;
-
-      // Find best opponent pair
-      let bestTeam2 = null, bestScore = Infinity;
-      for (const team2 of pairs) {
-        if (team2 === team1) continue;
-        if (team2.some(p => usedPlayerIds.has(p.id) || team1.find(t => t.id === p.id))) continue;
+      let bestJ = -1, bestScore = Infinity;
+      for (let j = i + 1; j < activePairs.length; j++) {
+        if (usedPairIdx.has(j)) continue;
+        const { pair: team2 } = activePairs[j];
+        // No player overlap
+        if (team1.some(p => team2.find(q => q.id === p.id))) continue;
 
         let score = 0;
         team1.forEach(a => team2.forEach(b => score += (opponentCount[a.id][b.id]||0) * 10));
@@ -945,58 +915,50 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
           score += (partnerCount[team2[0].id][team2[1].id]||0) * 5;
         }
         if (opponentMode === 'balanced') score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
-        if (score < bestScore) { bestScore = score; bestTeam2 = team2; }
+        if (score < bestScore) { bestScore = score; bestJ = j; }
       }
 
-      if (!bestTeam2) continue;
+      if (bestJ === -1) continue;
 
-      // Pick best court for these 4 players
-      const all4 = [...team1, ...bestTeam2];
-      const usedCourtsThisRound = new Set(roundMatches.map(m => m.court));
-      let bestCourt = 1;
-      let bestCourtScore = Infinity;
+      const { pair: team2 } = activePairs[bestJ];
+      usedPairIdx.add(i); usedPairIdx.add(bestJ);
+
+      const all4 = [...team1, ...team2];
+      const usedCourtsNow = new Set(roundMatches.map(m => m.court));
+      let bestCourt = 1, bestCourtScore = Infinity;
       for (let c = 1; c <= maxCourts; c++) {
-        if (usedCourtsThisRound.has(c)) continue;
+        if (usedCourtsNow.has(c)) continue;
         const cs = all4.reduce((s, p) => s + (courtCount[p.id][c]||0), 0);
         if (cs < bestCourtScore) { bestCourtScore = cs; bestCourt = c; }
       }
 
-      roundMatches.push({
-        round,
-        court: bestCourt,
-        scheduled_time: minutesToTime(currentMinute),
-        player1a_id: team1[0].id,
-        player1b_id: team1[1].id,
-        player2a_id: bestTeam2[0].id,
-        player2b_id: bestTeam2[1].id,
-        _team1: team1,
-        _team2: bestTeam2,
+      roundMatches.push({ round, court: bestCourt, scheduled_time: minutesToTime(currentMinute),
+        player1a_id: team1[0].id, player1b_id: team1[1].id,
+        player2a_id: team2[0].id, player2b_id: team2[1].id,
+        _team1: team1, _team2: team2 });
+    }
+
+    if (roundMatches.length === 0) { globalStuck++; continue; }
+
+    // Update rest counts for fixed pairs that didn't play this round
+    if (isFixed) {
+      const playingIds = new Set(roundMatches.flatMap(m => [m.player1a_id, m.player1b_id, m.player2a_id, m.player2b_id]));
+      fixedPairs.forEach((pair, i) => {
+        if (!playingIds.has(pair[0].id)) pairRestCount[i]++;
+        else pairRestCount[i] = 0;
       });
-
-      all4.forEach(p => usedPlayerIds.add(p.id));
     }
 
-    if (roundMatches.length === 0) {
-      globalStuck++;
-      continue;
-    }
-
-    // Commit round matches
+    // Commit
     roundMatches.forEach(m => {
       matches.push(m);
       const all4 = [...m._team1, ...m._team2];
-      all4.forEach(p => {
-        playCount[p.id]++;
-        courtCount[p.id][m.court] = (courtCount[p.id][m.court]||0) + 1;
-      });
+      all4.forEach(p => { playCount[p.id]++; courtCount[p.id][m.court] = (courtCount[p.id][m.court]||0)+1; });
       partnerCount[m._team1[0].id][m._team1[1].id]++;
       partnerCount[m._team1[1].id][m._team1[0].id]++;
       partnerCount[m._team2[0].id][m._team2[1].id]++;
       partnerCount[m._team2[1].id][m._team2[0].id]++;
-      m._team1.forEach(a => m._team2.forEach(b => {
-        opponentCount[a.id][b.id]++;
-        opponentCount[b.id][a.id]++;
-      }));
+      m._team1.forEach(a => m._team2.forEach(b => { opponentCount[a.id][b.id]++; opponentCount[b.id][a.id]++; }));
     });
 
     currentMinute += (minutesPerMatch || 30) + roundBreak;
@@ -1005,7 +967,6 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
   }
 
   console.log('Play counts:', players.map(p => `${p.full_name}:${playCount[p.id]}`).join(', '));
-  // Strip internal fields before returning
   return matches.map(({ _team1, _team2, ...m }) => m);
 }
 
@@ -1158,7 +1119,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.2</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.3</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1374,6 +1335,7 @@ ${t.length === 0 ? `
       <button class="btn btn-secondary btn-sm" onclick="copyShareLink('${tournament.share_token}')">📋 Compartir</button>
       <button class="btn btn-secondary btn-sm" onclick="finishTournament('${tournament.id}')">Finalizar</button>
     ` : ''}
+    <button class="btn btn-danger btn-sm" onclick="deleteTournament('${tournament.id}', '${tournament.name}')">🗑️</button>
   </div>
 </div>
 `).join('')}`;
@@ -1639,6 +1601,16 @@ async function saveTournament() {
     msg('Error inesperado: ' + e.message, 'error');
     if (btn) { btn.textContent = 'Crear torneo'; btn.disabled = false; }
   }
+}
+
+async function deleteTournament(id, name) {
+  if (!confirm(`¿Eliminar el torneo "${name}"? Esta acción no se puede deshacer.`)) return;
+  await db.from('matches').delete().eq('tournament_id', id);
+  await db.from('tournament_players').delete().eq('tournament_id', id);
+  await db.from('tournaments').delete().eq('id', id);
+  await loadTournaments();
+  msg('Torneo eliminado', 'info');
+  render();
 }
 
 async function publishTournament(id) {
