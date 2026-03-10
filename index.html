@@ -996,11 +996,22 @@ async function doLogin() {
   if (!email || !password) { msg('Introduce email y contraseña', 'error'); return; }
   const btn = document.querySelector('#auth-login .btn-primary');
   if (btn) { btn.textContent = 'Entrando...'; btn.disabled = true; }
-  const { error } = await db.auth.signInWithPassword({ email, password });
-  if (error) {
-    msg('Email o contraseña incorrectos', 'error');
-    if (btn) { btn.textContent = 'Entrar'; btn.disabled = false; }
+  
+  try {
+    const { data, error } = await db.auth.signInWithPassword({ email, password });
+    if (error) {
+      msg('Email o contraseña incorrectos: ' + error.message, 'error');
+    } else if (data?.user) {
+      state.user = data.user;
+      await Promise.all([loadPlayers(), loadTournaments()]);
+      render();
+      return;
+    }
+  } catch(e) {
+    msg('Error de conexión. Inténtalo de nuevo.', 'error');
   }
+  
+  if (btn) { btn.textContent = 'Entrar'; btn.disabled = false; }
 }
 
 async function doRegister() {
@@ -1031,7 +1042,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.1</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.2</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
