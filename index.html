@@ -945,11 +945,11 @@ function renderAuth() {
       <div class="auth-title">Iniciar sesión</div>
       <div class="field">
         <label>Email</label>
-        <input type="email" id="auth-email" placeholder="tu@email.com" />
+        <input type="email" id="auth-email" placeholder="tu@email.com" onkeydown="if(event.key==='Enter')doLogin()" />
       </div>
       <div class="field">
         <label>Contraseña</label>
-        <input type="password" id="auth-password" placeholder="••••••••" />
+        <input type="password" id="auth-password" placeholder="••••••••" onkeydown="if(event.key==='Enter')doLogin()" />
       </div>
       <button class="btn btn-primary btn-full btn-lg" onclick="doLogin()">Entrar</button>
       <div style="text-align:center;margin-top:16px">
@@ -991,10 +991,16 @@ function showLogin() {
 }
 
 async function doLogin() {
-  const email = document.getElementById('auth-email').value;
+  const email = document.getElementById('auth-email').value.trim();
   const password = document.getElementById('auth-password').value;
+  if (!email || !password) { msg('Introduce email y contraseña', 'error'); return; }
+  const btn = document.querySelector('#auth-login .btn-primary');
+  if (btn) { btn.textContent = 'Entrando...'; btn.disabled = true; }
   const { error } = await db.auth.signInWithPassword({ email, password });
-  if (error) msg(error.message, 'error');
+  if (error) {
+    msg('Email o contraseña incorrectos', 'error');
+    if (btn) { btn.textContent = 'Entrar'; btn.disabled = false; }
+  }
 }
 
 async function doRegister() {
@@ -1025,7 +1031,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.0</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.1</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
