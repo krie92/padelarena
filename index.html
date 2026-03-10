@@ -784,34 +784,42 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
     return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
   }
 
+  // Helper: pair a pool of players best+worst style (most balanced pairs)
+  function makeMixedPairs(pool) {
+    const s = [...pool].sort((a, b) => b.level - a.level);
+    const pairs = [];
+    let lo = s.length - 1, hi = 0;
+    const used = new Set();
+    while (hi < lo) {
+      while (hi < s.length && used.has(hi)) hi++;
+      while (lo >= 0 && used.has(lo)) lo--;
+      if (hi >= lo) break;
+      pairs.push([s[hi], s[lo]]);
+      used.add(hi); used.add(lo);
+      hi++; lo--;
+    }
+    return pairs;
+  }
+
   // Build fixed pairs once (for fixed partner mode)
   let fixedPairs = [];
   if (partnerMode === 'fixed' || partnerMode === 'fixed_mixed' || partnerMode === 'fixed_pure') {
-    const sorted = partnerMode === 'fixed_pure'
-      ? [...players].sort((a, b) => b.level - a.level)
-      : partnerMode === 'fixed_mixed'
-        ? (() => {
-            const s = [...players].sort((a, b) => b.level - a.level);
-            const pairs = [];
-            let lo = s.length - 1, hi = 0;
-            const used = new Set();
-            while (hi < lo) {
-              while (used.has(hi)) hi++;
-              while (used.has(lo)) lo--;
-              if (hi >= lo) break;
-              pairs.push([s[hi], s[lo]]);
-              used.add(hi); used.add(lo);
-              hi++; lo--;
-            }
-            return pairs;
-          })()
-        : null;
-
     if (partnerMode === 'fixed_mixed') {
-      fixedPairs = sorted; // already built above
+      // Best+worst across ALL players: 5+1, 4+2, 4+3, etc.
+      fixedPairs = makeMixedPairs(players);
+
     } else if (partnerMode === 'fixed_pure') {
-      for (let i = 0; i + 1 < sorted.length; i += 2)
-        fixedPairs.push([sorted[i], sorted[i+1]]);
+      // Split into top 50% and bottom 50%, then apply mixed pairing within each half
+      // Goal: pairs within each half have similar level sums → balanced within category
+      const sorted = [...players].sort((a, b) => b.level - a.level);
+      const mid = Math.floor(sorted.length / 2);
+      const topHalf = sorted.slice(0, mid);
+      const bottomHalf = sorted.slice(mid);
+      // If odd number, middle player goes to bottom half (already there by slice)
+      const topPairs = makeMixedPairs(topHalf);     // e.g. 5+4, 5+4 → sums ~9
+      const bottomPairs = makeMixedPairs(bottomHalf); // e.g. 3+1, 2+1 → sums ~4
+      fixedPairs = [...topPairs, ...bottomPairs];
+
     } else {
       // fixed random: shuffle and pair
       const s = shuffle(players);
@@ -829,6 +837,21 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
         for (let i = 0; i + 1 < s.length; i += 2) fixedPairs.push([s[i], s[i+1]]);
       }
     }
+  }
+
+  // Assign category to each fixed pair: top half = 'gold', bottom half = 'silver'
+  const pairCategory = {};
+  if (fixedPairs.length > 0) {
+    const sorted = [...fixedPairs].sort((a, b) => {
+      const sumB = b[0].level + b[1].level;
+      const sumA = a[0].level + a[1].level;
+      return sumB - sumA;
+    });
+    const mid = Math.ceil(sorted.length / 2);
+    sorted.forEach((pair, i) => {
+      const key = pair[0].id + '_' + pair[1].id;
+      pairCategory[key] = i < mid ? 'gold' : 'silver';
+    });
   }
 
   const isFixed = fixedPairs.length > 0;
@@ -926,6 +949,12 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
           score += (partnerCount[team2[0].id][team2[1].id]||0) * 5;
         }
         if (opponentMode === 'balanced') score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
+        // For fixed_pure: strongly prefer same-category matchups
+        if (partnerMode === 'fixed_pure') {
+          const cat1 = pairCategory[team1[0].id+'_'+team1[1].id] || pairCategory[team1[1].id+'_'+team1[0].id];
+          const cat2 = pairCategory[team2[0].id+'_'+team2[1].id] || pairCategory[team2[1].id+'_'+team2[0].id];
+          if (cat1 && cat2 && cat1 !== cat2) score += 50; // heavy penalty for cross-category
+        }
         if (score < bestScore) { bestScore = score; bestJ = j; }
       }
 
@@ -1130,7 +1159,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.6</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.4.0</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1708,6 +1737,8 @@ function renderTournamentDetailModal() {
   participants.forEach(tp => { if (tp.players) playerMap[tp.players.id] = tp.players; });
 
   const playerName = (id) => playerMap[id]?.full_name || 'Desconocido';
+  const playerLevel = (id) => playerMap[id]?.level || 0;
+  const levelSum = (a, b) => { const s = playerLevel(a) + playerLevel(b); return s > 0 ? `<div style="font-size:10px;color:var(--text3);margin-top:1px">Nv.${s}</div>` : ''; };
   const roundGroups = {};
   matches.forEach(m => {
     if (!roundGroups[m.round]) roundGroups[m.round] = [];
@@ -1741,11 +1772,13 @@ ${Object.keys(roundGroups).length === 0 ? `
       <div class="team">
         <div class="team-name ${t1won?'winner':''}">${playerName(m.player1a_id)}</div>
         <div class="team-name ${t1won?'winner':''}">${playerName(m.player1b_id)}</div>
+        ${levelSum(m.player1a_id, m.player1b_id)}
       </div>
       <div class="vs-badge">VS</div>
       <div class="team" style="text-align:right">
         <div class="team-name ${t2won?'winner':''}">${playerName(m.player2a_id)}</div>
         <div class="team-name ${t2won?'winner':''}">${playerName(m.player2b_id)}</div>
+        ${levelSum(m.player2a_id, m.player2b_id)}
       </div>
     </div>
     ${tournament.status !== 'draft' ? `
