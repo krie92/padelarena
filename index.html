@@ -1042,7 +1042,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.4</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.2.0</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1381,18 +1381,27 @@ function togglePlayer(id) {
   if (el) el.textContent = selectedPlayers.size;
 }
 
-const partnerDescriptions = {
-  fixed: 'Siempre el mismo compañero durante todo el torneo.',
-  rotating_random: 'Cada partido con un compañero diferente, asignado al azar.',
-  rotating_mixed: 'Compañeros rotativos formando parejas compensadas (bueno con malo).',
-  rotating_pure: 'Compañeros rotativos agrupando niveles similares (buenos con buenos).',
+const pairingDescriptions = {
+  random: 'Parejas asignadas completamente al azar.',
+  mixed: 'Parejas compensadas: un jugador bueno con uno menos bueno.',
+  pure: 'Parejas homogéneas: buenos con buenos, y menos buenos entre sí.',
 };
 
+function selectRotation(v) {
+  document.getElementById('t-rotation').value = v;
+  document.querySelectorAll('[data-rotation]').forEach(b => b.classList.toggle('active', b.dataset.rotation === v));
+}
+
+function selectPairing(v) {
+  document.getElementById('t-pairing').value = v;
+  document.querySelectorAll('[data-pairing]').forEach(b => b.classList.toggle('active', b.dataset.pairing === v));
+  const desc = document.getElementById('pairing-desc');
+  if (desc) desc.textContent = pairingDescriptions[v] || '';
+}
+
 function selectPartner(v) {
-  document.getElementById('t-partner').value = v;
+  document.getElementById('t-partner') && (document.getElementById('t-partner').value = v);
   document.querySelectorAll('[data-partner]').forEach(b => b.classList.toggle('active', b.dataset.partner === v));
-  const desc = document.getElementById('partner-desc');
-  if (desc) desc.textContent = partnerDescriptions[v] || '';
 }
 
 function selectOpponent(v) {
@@ -1410,11 +1419,24 @@ function selectFormat(v) {
   document.querySelectorAll('[data-format]').forEach(b => b.classList.toggle('active', b.dataset.format === v));
 }
 
+function getPartnerMode() {
+  const rotation = document.getElementById('t-rotation')?.value || 'fixed';
+  const pairing = document.getElementById('t-pairing')?.value || 'random';
+  if (rotation === 'fixed') {
+    return pairing === 'random' ? 'fixed' : pairing === 'mixed' ? 'fixed_mixed' : 'fixed_pure';
+  } else {
+    return pairing === 'random' ? 'rotating_random' : pairing === 'mixed' ? 'rotating_mixed' : 'rotating_pure';
+  }
+}
+
 async function saveTournament() {
   const name = document.getElementById('t-name').value.trim();
   const date = document.getElementById('t-date').value;
   if (!name || !date) { msg('Nombre y fecha son obligatorios', 'error'); return; }
   if (selectedPlayers.size < 4) { msg('Añade al menos 4 jugadores', 'error'); return; }
+
+  const btn = document.querySelector('.modal .btn-primary');
+  if (btn) { btn.textContent = 'Creando...'; btn.disabled = true; }
 
   const tData = {
     name,
@@ -1424,18 +1446,28 @@ async function saveTournament() {
     courts: parseInt(document.getElementById('t-courts').value),
     minutes_per_match: parseInt(document.getElementById('t-time').value),
     game_format: parseInt(document.getElementById('t-format').value),
-    partner_mode: document.getElementById('t-partner').value,
+    partner_mode: getPartnerMode(),
     opponent_mode: document.getElementById('t-opponent').value,
     gender_mode: document.getElementById('t-gender').value,
     owner_id: state.user.id,
   };
 
+  console.log('Creating tournament:', tData);
+
   const { data: t, error } = await db.from('tournaments').insert(tData).select().single();
-  if (error) { msg(error.message, 'error'); return; }
+  if (error) {
+    console.error('Tournament insert error:', error);
+    msg('Error: ' + error.message, 'error');
+    if (btn) { btn.textContent = 'Crear torneo'; btn.disabled = false; }
+    return;
+  }
+
+  console.log('Tournament created:', t.id);
 
   // Add participants
   const participants = [...selectedPlayers].map(pid => ({ tournament_id: t.id, player_id: pid }));
-  await db.from('tournament_players').insert(participants);
+  const { error: partErr } = await db.from('tournament_players').insert(participants);
+  if (partErr) console.error('Participants error:', partErr);
 
   // Generate matches
   const playersInTournament = state.players.filter(p => selectedPlayers.has(p.id));
@@ -1448,6 +1480,8 @@ async function saveTournament() {
     tData.courts
   );
 
+  console.log('Generated matches:', matches.length);
+
   if (matches.length > 0) {
     const matchData = matches.map(m => ({
       tournament_id: t.id,
@@ -1458,7 +1492,8 @@ async function saveTournament() {
       player2a_id: m.player2a_id,
       player2b_id: m.player2b_id,
     }));
-    await db.from('matches').insert(matchData);
+    const { error: matchErr } = await db.from('matches').insert(matchData);
+    if (matchErr) console.error('Matches error:', matchErr);
   }
 
   selectedPlayers.clear();
@@ -1548,9 +1583,9 @@ ${Object.keys(roundGroups).length === 0 ? `
     </div>
     ${tournament.status !== 'draft' ? `
     <div class="score-input">
-      <input type="number" id="s1-${m.id}" value="${m.score_team1??''}" placeholder="0" min="0" max="${tournament.game_format||6}" onchange="saveScore('${m.id}')" />
+      <input type="number" id="s1-${m.id}" value="${m.score_team1??''}" placeholder="0" min="0" onchange="saveScore('${m.id}')" />
       <span class="score-sep">-</span>
-      <input type="number" id="s2-${m.id}" value="${m.score_team2??''}" placeholder="0" min="0" max="${tournament.game_format||6}" onchange="saveScore('${m.id}')" />
+      <input type="number" id="s2-${m.id}" value="${m.score_team2??''}" placeholder="0" min="0" onchange="saveScore('${m.id}')" />
     </div>` : ''}
   </div>`;
   }).join('')}
