@@ -919,7 +919,9 @@ async function loadTournamentDetail(id) {
 // RENDER ENGINE
 // =============================================
 function render() {
+  console.log('render() called, user:', state.user?.email, 'page:', state.page);
   const app = document.getElementById('app');
+  if (!app) { console.error('No #app element found!'); return; }
   if (!state.user) {
     app.innerHTML = renderAuth();
   } else {
@@ -1040,7 +1042,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.3</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.1.4</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1690,13 +1692,16 @@ db.auth.onAuthStateChange(async (event, session) => {
   if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
     state.user = session?.user || null;
     if (state.user) {
+      console.log('Loading data for user:', state.user.id);
       await Promise.all([loadPlayers(), loadTournaments()]);
+      console.log('Data loaded. Players:', state.players.length, 'Tournaments:', state.tournaments.length);
     }
   } else if (event === 'SIGNED_OUT') {
     state.user = null;
     state.players = [];
     state.tournaments = [];
   }
+  console.log('Calling render, state.user:', state.user?.email);
   render();
 });
 
