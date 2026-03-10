@@ -846,10 +846,21 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
     // Get pairs that still need to play
     let activePairs;
     if (isFixed) {
-      activePairs = fixedPairs
+      const needyPairs = fixedPairs
         .map((pair, i) => ({ pair, i, plays: Math.min(playCount[pair[0].id], playCount[pair[1].id]), rests: pairRestCount[i] }))
         .filter(({ plays }) => plays < matchesPerPlayer)
-        .sort((a, b) => a.plays - b.plays || b.rests - a.rests); // least played + most rested first
+        .sort((a, b) => a.plays - b.plays || b.rests - a.rests);
+
+      // If only 1 needy pair left, allow already-done pairs to play as opponents (1 extra game)
+      if (needyPairs.length === 1) {
+        const donePairs = fixedPairs
+          .map((pair, i) => ({ pair, i, plays: Math.min(playCount[pair[0].id], playCount[pair[1].id]), rests: pairRestCount[i] }))
+          .filter(({ i }) => !needyPairs.find(n => n.i === i))
+          .sort((a, b) => a.plays - b.plays); // pick the ones with fewest extra games
+        activePairs = [...needyPairs, ...donePairs.slice(0, 1)];
+      } else {
+        activePairs = needyPairs;
+      }
     } else {
       const pool = [...players]
         .filter(p => playCount[p.id] < matchesPerPlayer)
@@ -1119,7 +1130,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.3</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.4</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
