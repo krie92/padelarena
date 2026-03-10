@@ -752,120 +752,231 @@ function buildPairs(players, partnerMode, genderMode, fixedPairs) {
   return pairs;
 }
 
-function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, genderMode, courts) {
+function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, genderMode, courts, startTime, minutesPerMatch) {
   const n = players.length;
   if (n < 4) return [];
 
   const playCount = {};
-  const partnerCount = {}; // partnerCount[a][b] = times a and b were partners
-  const opponentCount = {}; // opponentCount[a][b] = times a and b were opponents
+  const partnerCount = {};
+  const opponentCount = {};
+  const courtCount = {}; // how many times each player played on each court
 
   players.forEach(p => {
     playCount[p.id] = 0;
     partnerCount[p.id] = {};
     opponentCount[p.id] = {};
+    courtCount[p.id] = {};
+    for (let c = 1; c <= courts; c++) courtCount[p.id][c] = 0;
     players.forEach(q => {
       partnerCount[p.id][q.id] = 0;
       opponentCount[p.id][q.id] = 0;
     });
   });
 
-  // Build fixed pairs once if mode is fixed
-  let fixedPairs = [];
-  if (partnerMode === 'fixed') {
-    fixedPairs = buildPairs(players, 'rotating_random', genderMode, []);
+  // Parse start time into minutes since midnight
+  const [startH, startM] = (startTime || '10:00').split(':').map(Number);
+  let currentMinute = startH * 60 + startM;
+  const roundBreak = 5; // minutes between rounds
+
+  function minutesToTime(mins) {
+    const h = Math.floor(mins / 60) % 24;
+    const m = mins % 60;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
   }
 
-  const matches = [];
-  const totalTarget = Math.ceil(n / 4) * matchesPerPlayer;
-  let round = 1;
-  let stuckCount = 0;
+  // Build fixed pairs once (for fixed partner mode)
+  let fixedPairs = [];
+  if (partnerMode === 'fixed' || partnerMode === 'fixed_mixed' || partnerMode === 'fixed_pure') {
+    const sorted = partnerMode === 'fixed_pure'
+      ? [...players].sort((a, b) => b.level - a.level)
+      : partnerMode === 'fixed_mixed'
+        ? (() => {
+            const s = [...players].sort((a, b) => b.level - a.level);
+            const pairs = [];
+            let lo = s.length - 1, hi = 0;
+            const used = new Set();
+            while (hi < lo) {
+              while (used.has(hi)) hi++;
+              while (used.has(lo)) lo--;
+              if (hi >= lo) break;
+              pairs.push([s[hi], s[lo]]);
+              used.add(hi); used.add(lo);
+              hi++; lo--;
+            }
+            return pairs;
+          })()
+        : null;
 
-  while (stuckCount < 300) {
-    // Build pairs for this round
-    let pairs;
-    if (partnerMode === 'fixed') {
-      pairs = [...fixedPairs];
+    if (partnerMode === 'fixed_mixed') {
+      fixedPairs = sorted; // already built above
+    } else if (partnerMode === 'fixed_pure') {
+      for (let i = 0; i + 1 < sorted.length; i += 2)
+        fixedPairs.push([sorted[i], sorted[i+1]]);
     } else {
-      // For rotating modes, try to avoid repeating partners
-      let bestPairs = null;
-      let bestScore = Infinity;
-      for (let attempt = 0; attempt < 15; attempt++) {
-        const candidate = buildPairs(players, partnerMode, genderMode, fixedPairs);
-        const score = candidate.reduce((s, [a, b]) => s + (partnerCount[a.id][b.id] || 0), 0);
-        if (score < bestScore) { bestScore = score; bestPairs = candidate; }
+      // fixed random: shuffle and pair
+      const s = shuffle(players);
+      if (genderMode === 'mixed') {
+        const females = s.filter(p => p.gender === 'female');
+        const males = s.filter(p => p.gender !== 'female');
+        const usedM = new Set(), usedF = new Set();
+        females.forEach(f => {
+          const m = males.find(m => !usedM.has(m.id));
+          if (m) { fixedPairs.push([f, m]); usedF.add(f.id); usedM.add(m.id); }
+        });
+        const rem = s.filter(p => !usedF.has(p.id) && !usedM.has(p.id));
+        for (let i = 0; i + 1 < rem.length; i += 2) fixedPairs.push([rem[i], rem[i+1]]);
+      } else {
+        for (let i = 0; i + 1 < s.length; i += 2) fixedPairs.push([s[i], s[i+1]]);
       }
-      pairs = bestPairs;
+    }
+  }
+
+  const isFixed = fixedPairs.length > 0;
+  const matches = [];
+  let round = 1;
+  let globalStuck = 0;
+
+  while (globalStuck < 500) {
+    // Sort players by play count ascending — those with fewest games go first
+    const sortedByPlays = [...players].sort((a, b) => {
+      const diff = playCount[a.id] - playCount[b.id];
+      if (diff !== 0) return diff;
+      return Math.random() - 0.5;
+    });
+
+    // Check if everyone has reached the target
+    if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
+
+    // Build candidate pairs for this round prioritizing least-played
+    let roundPairs = [];
+
+    if (isFixed) {
+      // Fixed pairs: sort fixed pairs by minimum play count of their members
+      roundPairs = [...fixedPairs].sort((a, b) => {
+        const minA = Math.min(playCount[a[0].id], playCount[a[1].id]);
+        const minB = Math.min(playCount[b[0].id], playCount[b[1].id]);
+        return minA - minB;
+      });
+    } else {
+      // Rotating: build pairs from players sorted by least played
+      const pool = sortedByPlays.filter(p => playCount[p.id] < matchesPerPlayer);
+      if (pool.length < 4) break;
+
+      if (partnerMode === 'rotating_pure') {
+        const byLevel = [...pool].sort((a, b) => b.level - a.level);
+        for (let i = 0; i + 1 < byLevel.length; i += 2)
+          roundPairs.push([byLevel[i], byLevel[i+1]]);
+      } else if (partnerMode === 'rotating_mixed') {
+        const byLevel = [...pool].sort((a, b) => b.level - a.level);
+        let lo = byLevel.length - 1, hi = 0;
+        const used = new Set();
+        while (hi < lo) {
+          while (used.has(hi)) hi++;
+          while (used.has(lo)) lo--;
+          if (hi >= lo) break;
+          // Prefer pairs that haven't played together
+          roundPairs.push([byLevel[hi], byLevel[lo]]);
+          used.add(hi); used.add(lo);
+          hi++; lo--;
+        }
+      } else if (genderMode === 'mixed') {
+        const females = pool.filter(p => p.gender === 'female');
+        const males = pool.filter(p => p.gender !== 'female');
+        const usedM = new Set(), usedF = new Set();
+        females.forEach(f => {
+          const m = males.find(m => !usedM.has(m.id));
+          if (m) { roundPairs.push([f, m]); usedF.add(f.id); usedM.add(m.id); }
+        });
+        const rem = pool.filter(p => !usedF.has(p.id) && !usedM.has(p.id));
+        for (let i = 0; i + 1 < rem.length; i += 2) roundPairs.push([rem[i], rem[i+1]]);
+      } else {
+        // Rotating random: shuffle pool keeping least-played first
+        for (let i = 0; i + 1 < pool.length; i += 2)
+          roundPairs.push([pool[i], pool[i+1]]);
+      }
     }
 
-    if (!pairs || pairs.length < 2) { stuckCount++; continue; }
+    if (roundPairs.length < 2) { globalStuck++; continue; }
 
-    // Match pairs against each other
-    const usedPairs = new Set();
+    // Now match pairs against each other on available courts
+    const usedIdx = new Set();
+    const usedCourts = new Set();
     let addedThisRound = 0;
-    let court = 1;
+    let courtNum = 1;
+    const maxCourts = courts || 4;
 
-    for (let i = 0; i < pairs.length; i++) {
-      if (usedPairs.has(i)) continue;
-      const team1 = pairs[i];
+    for (let i = 0; i < roundPairs.length && courtNum <= maxCourts; i++) {
+      if (usedIdx.has(i)) continue;
+      const team1 = roundPairs[i];
 
-      // Find best opponent pair
-      let bestJ = -1;
-      let bestOppScore = Infinity;
+      // Skip if any player already played enough
+      if (team1.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
 
-      for (let j = i + 1; j < pairs.length; j++) {
-        if (usedPairs.has(j)) continue;
-        const team2 = pairs[j];
+      let bestJ = -1, bestScore = Infinity;
 
-        // Check none of the 4 players have played enough
-        const all4 = [...team1, ...team2];
-        if (all4.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
+      for (let j = i + 1; j < roundPairs.length; j++) {
+        if (usedIdx.has(j)) continue;
+        const team2 = roundPairs[j];
+        if (team2.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
 
-        // Score: prefer not repeating opponents, and balance levels if needed
+        // No overlap in players
+        const ids1 = team1.map(p => p.id);
+        const ids2 = team2.map(p => p.id);
+        if (ids1.some(id => ids2.includes(id))) continue;
+
         let score = 0;
+        // Penalize repeated opponents
         team1.forEach(a => team2.forEach(b => {
           score += (opponentCount[a.id][b.id] || 0) * 10;
         }));
-
+        // Penalize repeated partners (rotating)
+        if (!isFixed) {
+          score += (partnerCount[team1[0].id][team1[1].id] || 0) * 5;
+          score += (partnerCount[team2[0].id][team2[1].id] || 0) * 5;
+        }
+        // For balanced opponents, penalize level mismatch
         if (opponentMode === 'balanced') {
-          const diff = Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2));
-          score += diff * 5;
+          score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
         }
+        // Prefer players with fewer matches
+        score -= (matchesPerPlayer - playCount[team1[0].id]) + (matchesPerPlayer - playCount[team1[1].id]);
+        score -= (matchesPerPlayer - playCount[team2[0].id]) + (matchesPerPlayer - playCount[team2[1].id]);
 
-        // Mixed gender compensation: if one team has female and other doesn't, prefer lower level male
-        if (genderMode === 'mixed') {
-          const t1hasFemale = team1.some(p => p.gender === 'female');
-          const t2hasFemale = team2.some(p => p.gender === 'female');
-          if (t1hasFemale !== t2hasFemale) {
-            const mixedTeam = t1hasFemale ? team1 : team2;
-            const maleTeam = t1hasFemale ? team2 : team1;
-            const mixedAvg = teamAvgLevel(mixedTeam);
-            const maleAvg = teamAvgLevel(maleTeam);
-            // Penalize if male-only team is higher level (we want them 1 level lower)
-            if (maleAvg > mixedAvg - 0.5) score += (maleAvg - (mixedAvg - 1)) * 3;
-          }
-        }
-
-        if (score < bestOppScore) { bestOppScore = score; bestJ = j; }
+        if (score < bestScore) { bestScore = score; bestJ = j; }
       }
 
       if (bestJ === -1) continue;
 
-      const team2 = pairs[bestJ];
-      usedPairs.add(i); usedPairs.add(bestJ);
+      const team2 = roundPairs[bestJ];
+      usedIdx.add(i); usedIdx.add(bestJ);
 
+      // Pick court: prefer court where players have played least
       const all4 = [...team1, ...team2];
+      let bestCourt = courtNum;
+      let bestCourtScore = Infinity;
+      for (let c = 1; c <= maxCourts; c++) {
+        if (usedCourts.has(c)) continue;
+        const cs = all4.reduce((s, p) => s + (courtCount[p.id][c] || 0), 0);
+        if (cs < bestCourtScore) { bestCourtScore = cs; bestCourt = c; }
+      }
+
+      usedCourts.add(bestCourt);
+
       matches.push({
         round,
-        court: ((court - 1) % (courts || 4)) + 1,
+        court: bestCourt,
+        scheduled_time: minutesToTime(currentMinute),
         player1a_id: team1[0].id,
         player1b_id: team1[1].id,
         player2a_id: team2[0].id,
         player2b_id: team2[1].id,
       });
 
-      // Update counts
-      all4.forEach(p => playCount[p.id]++);
+      // Update counters
+      all4.forEach(p => {
+        playCount[p.id]++;
+        courtCount[p.id][bestCourt] = (courtCount[p.id][bestCourt] || 0) + 1;
+      });
       partnerCount[team1[0].id][team1[1].id]++;
       partnerCount[team1[1].id][team1[0].id]++;
       partnerCount[team2[0].id][team2[1].id]++;
@@ -876,20 +987,20 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
       }));
 
       addedThisRound++;
-      court++;
+      courtNum++;
     }
 
     if (addedThisRound === 0) {
-      stuckCount++;
+      globalStuck++;
     } else {
-      stuckCount = 0;
+      globalStuck = 0;
+      currentMinute += (minutesPerMatch || 30) + roundBreak;
       round++;
     }
-
-    // Stop if everyone has played enough
-    if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
   }
 
+  // Log final play counts
+  console.log('Play counts:', players.map(p => `${p.full_name}:${playCount[p.id]}`).join(', '));
   return matches;
 }
 
@@ -1042,7 +1153,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.2.2</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.0</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1304,13 +1415,18 @@ function renderTournamentModal() {
     <input type="range" id="t-time" min="15" max="90" step="5" value="30" oninput="document.getElementById('time-label').textContent=this.value" style="width:100%;accent-color:var(--accent)" />
   </div>
   <div class="field">
-    <label>Formato de partido</label>
-    <div class="toggle-group" style="margin-top:6px">
-      <button class="toggle-btn active" data-format="6" onclick="selectFormat('6')">6 juegos</button>
-      <button class="toggle-btn" data-format="9" onclick="selectFormat('9')">9 juegos</button>
-    </div>
-    <input type="hidden" id="t-format" value="6" />
+    <label>Hora de inicio</label>
+    <input type="time" id="t-starttime" value="10:00" style="width:100%" />
   </div>
+</div>
+
+<div class="field">
+  <label>Formato de partido</label>
+  <div class="toggle-group">
+    <button class="toggle-btn active" data-format="6" onclick="selectFormat('6')">6 juegos</button>
+    <button class="toggle-btn" data-format="9" onclick="selectFormat('9')">9 juegos</button>
+  </div>
+  <input type="hidden" id="t-format" value="6" />
 </div>
 
 <div class="divider"></div>
@@ -1454,6 +1570,7 @@ async function saveTournament() {
       courts: parseInt(document.getElementById('t-courts')?.value) || 4,
       minutes_per_match: parseInt(document.getElementById('t-time')?.value) || 30,
       game_format: parseInt(document.getElementById('t-format')?.value) || 6,
+      start_time: document.getElementById('t-starttime')?.value || '10:00',
       partner_mode: partnerMode,
       opponent_mode: document.getElementById('t-opponent')?.value || 'random',
       gender_mode: document.getElementById('t-gender')?.value || 'unisex',
@@ -1485,7 +1602,9 @@ async function saveTournament() {
       tData.partner_mode,
       tData.opponent_mode,
       tData.gender_mode,
-      tData.courts
+      tData.courts,
+      tData.start_time,
+      tData.minutes_per_match
     );
 
     console.log('Generated matches:', matches.length);
@@ -1495,6 +1614,7 @@ async function saveTournament() {
         tournament_id: t.id,
         round: m.round,
         court: m.court,
+        scheduled_time: m.scheduled_time || null,
         player1a_id: m.player1a_id,
         player1b_id: m.player1b_id,
         player2a_id: m.player2a_id,
@@ -1583,6 +1703,7 @@ ${Object.keys(roundGroups).length === 0 ? `
     <div class="match-round">
       <div>R${m.round}</div>
       ${m.court ? `<div style="color:var(--accent);font-size:10px">P${m.court}</div>` : ''}
+      ${m.scheduled_time ? `<div style="color:var(--text3);font-size:10px">${m.scheduled_time}</div>` : ''}
     </div>
     <div class="match-teams">
       <div class="team">
