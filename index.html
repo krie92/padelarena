@@ -937,38 +937,55 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
       if (usedPairIdx.has(i)) continue;
       const { pair: team1 } = activePairs[i];
 
-      let bestJ = -1, bestScore = Infinity;
-      for (let j = i + 1; j < activePairs.length; j++) {
-        if (usedPairIdx.has(j)) continue;
-        const { pair: team2 } = activePairs[j];
-        // No player overlap
-        if (team1.some(p => team2.find(q => q.id === p.id))) continue;
+      // Multi-pass for fixed_pure: increasingly relaxed constraints
+      // Pass 1: same category, not yet played → ideal
+      // Pass 2: same category, already played (extra game) → better than cross-category
+      // Pass 3: any category, not yet played → cross-category but fresh
+      // Pass 4: any category, already played → last resort
+      const allCandidates = activePairs
+        .map(({ pair }, j) => ({ pair, j }))
+        .filter(({ pair, j }) => j > i && !usedPairIdx.has(j) && !team1.some(p => pair.find(q => q.id === p.id)));
 
-        let score = 0;
-        team1.forEach(a => team2.forEach(b => score += (opponentCount[a.id][b.id]||0) * 10));
-        if (!isFixed) {
-          score += (partnerCount[team1[0].id][team1[1].id]||0) * 5;
-          score += (partnerCount[team2[0].id][team2[1].id]||0) * 5;
+      // Also include already-completed pairs as potential extra-game opponents
+      const completedCandidates = fixedPairs
+        .map((pair, j) => ({ pair, j: activePairs.length + j }))
+        .filter(({ pair }) =>
+          !usedPairIdx.has(activePairs.length + fixedPairs.indexOf(pair)) &&
+          !team1.some(p => pair.find(q => q.id === p.id)) &&
+          !activePairs.find(ap => ap.pair === pair) // not already in activePairs
+        );
+
+      const getCat = (pair) => pairCategory[pair[0].id+'_'+pair[1].id] || pairCategory[pair[1].id+'_'+pair[0].id];
+      const getLevelSum = (pair) => pair[0].level + pair[1].level;
+      const team1Cat = getCat(team1);
+      const team1Sum = getLevelSum(team1);
+
+      // Score a candidate: lower = better
+      const scoreCandidate = (pair, isExtra) => {
+        let s = 0;
+        team1.forEach(a => pair.forEach(b => s += (opponentCount[a.id][b.id]||0) * 10));
+        const cat2 = getCat(pair);
+        if (partnerMode === 'fixed_pure' && team1Cat && cat2 && team1Cat !== cat2) {
+          s += 50 + Math.abs(team1Sum - getLevelSum(pair)) * 5;
         }
-        if (opponentMode === 'balanced') score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
-        if (partnerMode === 'fixed_pure') {
-          const cat1 = pairCategory[team1[0].id+'_'+team1[1].id] || pairCategory[team1[1].id+'_'+team1[0].id];
-          const cat2 = pairCategory[team2[0].id+'_'+team2[1].id] || pairCategory[team2[1].id+'_'+team2[0].id];
-          if (cat1 && cat2 && cat1 !== cat2) {
-            const diff = Math.abs((team1[0].level+team1[1].level) - (team2[0].level+team2[1].level));
-            if (diff > 3) continue; // hard block — leave court empty instead
-            score += 50; // small diff cross-category: penalize but allow
-          }
-        }
-        if (score < bestScore) { bestScore = score; bestJ = j; }
-      }
+        if (isExtra) s += 30; // slight penalty for giving someone an extra game
+        if (opponentMode === 'balanced') s += Math.abs(teamAvgLevel(team1) - teamAvgLevel(pair)) * 3;
+        return s;
+      };
 
-      if (bestJ === -1) continue;
+      // Combine all candidates, sort by score
+      const allOptions = [
+        ...allCandidates.map(({ pair, j }) => ({ pair, j, score: scoreCandidate(pair, false) })),
+        ...completedCandidates.map(({ pair, j }) => ({ pair, j, score: scoreCandidate(pair, true) })),
+      ].sort((a, b) => a.score - b.score);
 
-      const { pair: team2 } = activePairs[bestJ];
-      usedPairIdx.add(i); usedPairIdx.add(bestJ);
+      if (allOptions.length === 0) continue;
 
-      const all4 = [...team1, ...team2];
+      const best = allOptions[0];
+      usedPairIdx.add(i);
+      usedPairIdx.add(best.j);
+
+      const all4 = [...team1, ...best.pair];
       const usedCourtsNow = new Set(roundMatches.map(m => m.court));
       let bestCourt = 1, bestCourtScore = Infinity;
       for (let c = 1; c <= maxCourts; c++) {
@@ -979,8 +996,8 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
 
       roundMatches.push({ round, court: bestCourt, scheduled_time: minutesToTime(currentMinute),
         player1a_id: team1[0].id, player1b_id: team1[1].id,
-        player2a_id: team2[0].id, player2b_id: team2[1].id,
-        _team1: team1, _team2: team2 });
+        player2a_id: best.pair[0].id, player2b_id: best.pair[1].id,
+        _team1: team1, _team2: best.pair });
     }
 
     if (roundMatches.length === 0) { globalStuck++; continue; }
@@ -1193,7 +1210,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.4.3</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.4.5</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
