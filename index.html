@@ -840,15 +840,39 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
   while (globalStuck < 200) {
     if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
 
-    // Players available this round (haven't hit target yet)
+    // Players who still need more matches — allow slight overage for pairs
+    const needsMore = p => playCount[p.id] < matchesPerPlayer;
+    // For fixed mode, a pair is available if at least one member needs more games
+    const pairNeedsMore = pair => pair.some(p => needsMore(p));
+
     const available = [...players]
       .filter(p => playCount[p.id] < matchesPerPlayer)
       .sort((a, b) => playCount[a.id] - playCount[b.id] || Math.random() - 0.5);
 
-    if (available.length < 4) break;
+    if (available.length < 4) {
+      // In fixed mode, check if any pair still needs games even if partner is done
+      if (isFixed) {
+        const needyPairs = fixedPairs.filter(pairNeedsMore);
+        if (needyPairs.length < 2) break;
+        // Allow partner to play one extra to cover their partner
+        // Expand available to include partners of needy players
+        const needyIds = new Set(needyPairs.flat().map(p => p.id));
+        const expanded = players.filter(p => needyIds.has(p.id));
+        if (expanded.length < 4) break;
+        available.push(...players.filter(p => !needsMore(p) && needyIds.has(p.id)));
+      } else {
+        break;
+      }
+    }
 
     // How many matches can we fit this round?
-    const matchesThisRound = Math.min(maxCourts, Math.floor(available.length / 4));
+    const availablePairs = isFixed
+      ? fixedPairs.filter(([a, b]) => available.find(p => p.id === a.id) && available.find(p => p.id === b.id))
+      : null;
+
+    const pairCount = isFixed ? availablePairs.length : Math.floor(available.length / 2);
+    const matchesThisRound = Math.min(maxCourts, Math.floor(pairCount / 2) * 1 || 0);
+
     if (matchesThisRound === 0) { globalStuck++; continue; }
 
     // Build all possible pairs from available players
@@ -903,9 +927,9 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
 
     const pairs = buildRoundPairs(available);
 
-    // Greedily assign matches to courts
+    // Greedily assign matches to courts - fill ALL available courts
     for (const team1 of pairs) {
-      if (roundMatches.length >= matchesThisRound) break;
+      if (roundMatches.length >= maxCourts) break;
       if (team1.some(p => usedPlayerIds.has(p.id))) continue;
 
       // Find best opponent pair
@@ -1134,7 +1158,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.1</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.2</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
