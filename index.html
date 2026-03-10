@@ -835,47 +835,46 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
   const matches = [];
   let round = 1;
   let globalStuck = 0;
+  const maxCourts = courts || 4;
 
-  while (globalStuck < 500) {
-    // Sort players by play count ascending — those with fewest games go first
-    const sortedByPlays = [...players].sort((a, b) => {
-      const diff = playCount[a.id] - playCount[b.id];
-      if (diff !== 0) return diff;
-      return Math.random() - 0.5;
-    });
-
-    // Check if everyone has reached the target
+  while (globalStuck < 200) {
     if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
 
-    // Build candidate pairs for this round prioritizing least-played
-    let roundPairs = [];
+    // Players available this round (haven't hit target yet)
+    const available = [...players]
+      .filter(p => playCount[p.id] < matchesPerPlayer)
+      .sort((a, b) => playCount[a.id] - playCount[b.id] || Math.random() - 0.5);
 
-    if (isFixed) {
-      // Fixed pairs: sort fixed pairs by minimum play count of their members
-      roundPairs = [...fixedPairs].sort((a, b) => {
-        const minA = Math.min(playCount[a[0].id], playCount[a[1].id]);
-        const minB = Math.min(playCount[b[0].id], playCount[b[1].id]);
-        return minA - minB;
-      });
-    } else {
-      // Rotating: build pairs from players sorted by least played
-      const pool = sortedByPlays.filter(p => playCount[p.id] < matchesPerPlayer);
-      if (pool.length < 4) break;
+    if (available.length < 4) break;
 
-      if (partnerMode === 'rotating_pure') {
-        const byLevel = [...pool].sort((a, b) => b.level - a.level);
-        for (let i = 0; i + 1 < byLevel.length; i += 2)
-          roundPairs.push([byLevel[i], byLevel[i+1]]);
-      } else if (partnerMode === 'rotating_mixed') {
-        const byLevel = [...pool].sort((a, b) => b.level - a.level);
-        let lo = byLevel.length - 1, hi = 0;
-        const used = new Set();
+    // How many matches can we fit this round?
+    const matchesThisRound = Math.min(maxCourts, Math.floor(available.length / 4));
+    if (matchesThisRound === 0) { globalStuck++; continue; }
+
+    // Build all possible pairs from available players
+    function buildRoundPairs(pool) {
+      if (isFixed) {
+        return fixedPairs
+          .filter(([a, b]) => pool.find(p => p.id === a.id) && pool.find(p => p.id === b.id))
+          .sort((a, b) => playCount[a[0].id] + playCount[a[1].id] - playCount[b[0].id] - playCount[b[1].id]);
+      }
+      const sorted = partnerMode === 'rotating_pure'
+        ? [...pool].sort((a, b) => b.level - a.level)
+        : partnerMode === 'rotating_mixed'
+          ? [...pool].sort((a, b) => b.level - a.level)
+          : shuffle(pool);
+
+      const pairs = [];
+      const used = new Set();
+
+      if (partnerMode === 'rotating_mixed') {
+        let hi = 0, lo = sorted.length - 1;
         while (hi < lo) {
           while (used.has(hi)) hi++;
           while (used.has(lo)) lo--;
           if (hi >= lo) break;
-          // Prefer pairs that haven't played together
-          roundPairs.push([byLevel[hi], byLevel[lo]]);
+          // Prefer not repeating partner
+          pairs.push([sorted[hi], sorted[lo]]);
           used.add(hi); used.add(lo);
           hi++; lo--;
         }
@@ -884,124 +883,106 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
         const males = pool.filter(p => p.gender !== 'female');
         const usedM = new Set(), usedF = new Set();
         females.forEach(f => {
-          const m = males.find(m => !usedM.has(m.id));
-          if (m) { roundPairs.push([f, m]); usedF.add(f.id); usedM.add(m.id); }
+          // Pick male with fewest partner repeats
+          const m = males
+            .filter(m => !usedM.has(m.id))
+            .sort((a, b) => (partnerCount[f.id][a.id]||0) - (partnerCount[f.id][b.id]||0))[0];
+          if (m) { pairs.push([f, m]); usedF.add(f.id); usedM.add(m.id); }
         });
         const rem = pool.filter(p => !usedF.has(p.id) && !usedM.has(p.id));
-        for (let i = 0; i + 1 < rem.length; i += 2) roundPairs.push([rem[i], rem[i+1]]);
+        for (let i = 0; i + 1 < rem.length; i += 2) pairs.push([rem[i], rem[i+1]]);
       } else {
-        // Rotating random: shuffle pool keeping least-played first
-        for (let i = 0; i + 1 < pool.length; i += 2)
-          roundPairs.push([pool[i], pool[i+1]]);
+        for (let i = 0; i + 1 < sorted.length; i += 2) pairs.push([sorted[i], sorted[i+1]]);
       }
+      return pairs;
     }
 
-    if (roundPairs.length < 2) { globalStuck++; continue; }
+    // Try to fill exactly matchesThisRound courts
+    const roundMatches = [];
+    const usedPlayerIds = new Set();
 
-    // Now match pairs against each other on available courts
-    const usedIdx = new Set();
-    const usedCourts = new Set();
-    let addedThisRound = 0;
-    let courtNum = 1;
-    const maxCourts = courts || 4;
+    const pairs = buildRoundPairs(available);
 
-    for (let i = 0; i < roundPairs.length && courtNum <= maxCourts; i++) {
-      if (usedIdx.has(i)) continue;
-      const team1 = roundPairs[i];
+    // Greedily assign matches to courts
+    for (const team1 of pairs) {
+      if (roundMatches.length >= matchesThisRound) break;
+      if (team1.some(p => usedPlayerIds.has(p.id))) continue;
 
-      // Skip if any player already played enough
-      if (team1.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
-
-      let bestJ = -1, bestScore = Infinity;
-
-      for (let j = i + 1; j < roundPairs.length; j++) {
-        if (usedIdx.has(j)) continue;
-        const team2 = roundPairs[j];
-        if (team2.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
-
-        // No overlap in players
-        const ids1 = team1.map(p => p.id);
-        const ids2 = team2.map(p => p.id);
-        if (ids1.some(id => ids2.includes(id))) continue;
+      // Find best opponent pair
+      let bestTeam2 = null, bestScore = Infinity;
+      for (const team2 of pairs) {
+        if (team2 === team1) continue;
+        if (team2.some(p => usedPlayerIds.has(p.id) || team1.find(t => t.id === p.id))) continue;
 
         let score = 0;
-        // Penalize repeated opponents
-        team1.forEach(a => team2.forEach(b => {
-          score += (opponentCount[a.id][b.id] || 0) * 10;
-        }));
-        // Penalize repeated partners (rotating)
+        team1.forEach(a => team2.forEach(b => score += (opponentCount[a.id][b.id]||0) * 10));
         if (!isFixed) {
-          score += (partnerCount[team1[0].id][team1[1].id] || 0) * 5;
-          score += (partnerCount[team2[0].id][team2[1].id] || 0) * 5;
+          score += (partnerCount[team1[0].id][team1[1].id]||0) * 5;
+          score += (partnerCount[team2[0].id][team2[1].id]||0) * 5;
         }
-        // For balanced opponents, penalize level mismatch
-        if (opponentMode === 'balanced') {
-          score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
-        }
-        // Prefer players with fewer matches
-        score -= (matchesPerPlayer - playCount[team1[0].id]) + (matchesPerPlayer - playCount[team1[1].id]);
-        score -= (matchesPerPlayer - playCount[team2[0].id]) + (matchesPerPlayer - playCount[team2[1].id]);
-
-        if (score < bestScore) { bestScore = score; bestJ = j; }
+        if (opponentMode === 'balanced') score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
+        if (score < bestScore) { bestScore = score; bestTeam2 = team2; }
       }
 
-      if (bestJ === -1) continue;
+      if (!bestTeam2) continue;
 
-      const team2 = roundPairs[bestJ];
-      usedIdx.add(i); usedIdx.add(bestJ);
-
-      // Pick court: prefer court where players have played least
-      const all4 = [...team1, ...team2];
-      let bestCourt = courtNum;
+      // Pick best court for these 4 players
+      const all4 = [...team1, ...bestTeam2];
+      const usedCourtsThisRound = new Set(roundMatches.map(m => m.court));
+      let bestCourt = 1;
       let bestCourtScore = Infinity;
       for (let c = 1; c <= maxCourts; c++) {
-        if (usedCourts.has(c)) continue;
-        const cs = all4.reduce((s, p) => s + (courtCount[p.id][c] || 0), 0);
+        if (usedCourtsThisRound.has(c)) continue;
+        const cs = all4.reduce((s, p) => s + (courtCount[p.id][c]||0), 0);
         if (cs < bestCourtScore) { bestCourtScore = cs; bestCourt = c; }
       }
 
-      usedCourts.add(bestCourt);
-
-      matches.push({
+      roundMatches.push({
         round,
         court: bestCourt,
         scheduled_time: minutesToTime(currentMinute),
         player1a_id: team1[0].id,
         player1b_id: team1[1].id,
-        player2a_id: team2[0].id,
-        player2b_id: team2[1].id,
+        player2a_id: bestTeam2[0].id,
+        player2b_id: bestTeam2[1].id,
+        _team1: team1,
+        _team2: bestTeam2,
       });
 
-      // Update counters
+      all4.forEach(p => usedPlayerIds.add(p.id));
+    }
+
+    if (roundMatches.length === 0) {
+      globalStuck++;
+      continue;
+    }
+
+    // Commit round matches
+    roundMatches.forEach(m => {
+      matches.push(m);
+      const all4 = [...m._team1, ...m._team2];
       all4.forEach(p => {
         playCount[p.id]++;
-        courtCount[p.id][bestCourt] = (courtCount[p.id][bestCourt] || 0) + 1;
+        courtCount[p.id][m.court] = (courtCount[p.id][m.court]||0) + 1;
       });
-      partnerCount[team1[0].id][team1[1].id]++;
-      partnerCount[team1[1].id][team1[0].id]++;
-      partnerCount[team2[0].id][team2[1].id]++;
-      partnerCount[team2[1].id][team2[0].id]++;
-      team1.forEach(a => team2.forEach(b => {
+      partnerCount[m._team1[0].id][m._team1[1].id]++;
+      partnerCount[m._team1[1].id][m._team1[0].id]++;
+      partnerCount[m._team2[0].id][m._team2[1].id]++;
+      partnerCount[m._team2[1].id][m._team2[0].id]++;
+      m._team1.forEach(a => m._team2.forEach(b => {
         opponentCount[a.id][b.id]++;
         opponentCount[b.id][a.id]++;
       }));
+    });
 
-      addedThisRound++;
-      courtNum++;
-    }
-
-    if (addedThisRound === 0) {
-      globalStuck++;
-    } else {
-      globalStuck = 0;
-      currentMinute += (minutesPerMatch || 30) + roundBreak;
-      round++;
-    }
+    currentMinute += (minutesPerMatch || 30) + roundBreak;
+    round++;
+    globalStuck = 0;
   }
 
-  // Log final play counts
   console.log('Play counts:', players.map(p => `${p.full_name}:${playCount[p.id]}`).join(', '));
-  return matches;
+  // Strip internal fields before returning
+  return matches.map(({ _team1, _team2, ...m }) => m);
 }
 
 // =============================================
@@ -1153,7 +1134,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.0</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.3.1</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
