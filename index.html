@@ -1042,7 +1042,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.2.0</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.2.2</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
@@ -1322,17 +1322,21 @@ function renderTournamentModal() {
 <input type="hidden" id="t-gender" value="unisex" />
 
 <div class="divider"></div>
-<div class="section-title">Modo de compañero</div>
+<div class="section-title">¿Compañero fijo o rotativo?</div>
 <div class="toggle-group">
-  <button class="toggle-btn active" data-partner="fixed" onclick="selectPartner('fixed')">🔒 Fijo</button>
-  <button class="toggle-btn" data-partner="rotating_random" onclick="selectPartner('rotating_random')">🔀 Rotativo aleatorio</button>
-  <button class="toggle-btn" data-partner="rotating_mixed" onclick="selectPartner('rotating_mixed')">⚖️ Rotativo nivelado mixto</button>
-  <button class="toggle-btn" data-partner="rotating_pure" onclick="selectPartner('rotating_pure')">🏆 Rotativo nivelado puro</button>
+  <button class="toggle-btn active" data-rotation="fixed" onclick="selectRotation('fixed')">🔒 Fijo toda la jornada</button>
+  <button class="toggle-btn" data-rotation="rotating" onclick="selectRotation('rotating')">🔀 Rota cada partido</button>
 </div>
-<input type="hidden" id="t-partner" value="fixed" />
-<div id="partner-desc" style="color:var(--text2);font-size:12px;margin-top:8px">
-  Siempre el mismo compañero durante todo el torneo.
+<input type="hidden" id="t-rotation" value="fixed" />
+
+<div style="margin-top:16px" class="section-title">¿Cómo se forman las parejas?</div>
+<div class="toggle-group">
+  <button class="toggle-btn active" data-pairing="random" onclick="selectPairing('random')">🎲 Aleatorio</button>
+  <button class="toggle-btn" data-pairing="mixed" onclick="selectPairing('mixed')">⚖️ Nivelado mixto <span style="font-size:11px;opacity:0.7">(bueno+malo)</span></button>
+  <button class="toggle-btn" data-pairing="pure" onclick="selectPairing('pure')">🏆 Nivelado puro <span style="font-size:11px;opacity:0.7">(buenos+buenos)</span></button>
 </div>
+<input type="hidden" id="t-pairing" value="random" />
+<div id="pairing-desc" style="color:var(--text2);font-size:12px;margin-top:8px">Parejas asignadas completamente al azar.</div>
 
 <div style="margin-top:16px" class="section-title">Modo de rivales</div>
 <div class="toggle-group">
@@ -1438,68 +1442,78 @@ async function saveTournament() {
   const btn = document.querySelector('.modal .btn-primary');
   if (btn) { btn.textContent = 'Creando...'; btn.disabled = true; }
 
-  const tData = {
-    name,
-    scheduled_date: date,
-    location: document.getElementById('t-location').value.trim() || null,
-    matches_per_player: parseInt(document.getElementById('t-matches').value),
-    courts: parseInt(document.getElementById('t-courts').value),
-    minutes_per_match: parseInt(document.getElementById('t-time').value),
-    game_format: parseInt(document.getElementById('t-format').value),
-    partner_mode: getPartnerMode(),
-    opponent_mode: document.getElementById('t-opponent').value,
-    gender_mode: document.getElementById('t-gender').value,
-    owner_id: state.user.id,
-  };
+  try {
+    const partnerMode = getPartnerMode();
+    console.log('Partner mode:', partnerMode);
 
-  console.log('Creating tournament:', tData);
+    const tData = {
+      name,
+      scheduled_date: date,
+      location: document.getElementById('t-location')?.value.trim() || null,
+      matches_per_player: parseInt(document.getElementById('t-matches')?.value) || 3,
+      courts: parseInt(document.getElementById('t-courts')?.value) || 4,
+      minutes_per_match: parseInt(document.getElementById('t-time')?.value) || 30,
+      game_format: parseInt(document.getElementById('t-format')?.value) || 6,
+      partner_mode: partnerMode,
+      opponent_mode: document.getElementById('t-opponent')?.value || 'random',
+      gender_mode: document.getElementById('t-gender')?.value || 'unisex',
+      owner_id: state.user.id,
+    };
 
-  const { data: t, error } = await db.from('tournaments').insert(tData).select().single();
-  if (error) {
-    console.error('Tournament insert error:', error);
-    msg('Error: ' + error.message, 'error');
+    console.log('Creating tournament:', JSON.stringify(tData));
+
+    const { data: t, error } = await db.from('tournaments').insert(tData).select().single();
+    if (error) {
+      console.error('Tournament insert error:', error.message, error.details, error.hint);
+      msg('Error al crear torneo: ' + error.message, 'error');
+      if (btn) { btn.textContent = 'Crear torneo'; btn.disabled = false; }
+      return;
+    }
+
+    console.log('Tournament created:', t.id);
+
+    // Add participants
+    const participants = [...selectedPlayers].map(pid => ({ tournament_id: t.id, player_id: pid }));
+    const { error: partErr } = await db.from('tournament_players').insert(participants);
+    if (partErr) console.error('Participants error:', partErr.message);
+
+    // Generate matches
+    const playersInTournament = state.players.filter(p => selectedPlayers.has(p.id));
+    const matches = generateMatches(
+      playersInTournament,
+      tData.matches_per_player,
+      tData.partner_mode,
+      tData.opponent_mode,
+      tData.gender_mode,
+      tData.courts
+    );
+
+    console.log('Generated matches:', matches.length);
+
+    if (matches.length > 0) {
+      const matchData = matches.map(m => ({
+        tournament_id: t.id,
+        round: m.round,
+        court: m.court,
+        player1a_id: m.player1a_id,
+        player1b_id: m.player1b_id,
+        player2a_id: m.player2a_id,
+        player2b_id: m.player2b_id,
+      }));
+      const { error: matchErr } = await db.from('matches').insert(matchData);
+      if (matchErr) console.error('Matches error:', matchErr.message);
+    }
+
+    selectedPlayers.clear();
+    await loadTournaments();
+    closeModal();
+    msg(`Torneo "${name}" creado con ${matches.length} partidos ✓`, 'success');
+
+  } catch(e) {
+    console.error('Unexpected error in saveTournament:', e);
+    msg('Error inesperado: ' + e.message, 'error');
     if (btn) { btn.textContent = 'Crear torneo'; btn.disabled = false; }
-    return;
   }
-
-  console.log('Tournament created:', t.id);
-
-  // Add participants
-  const participants = [...selectedPlayers].map(pid => ({ tournament_id: t.id, player_id: pid }));
-  const { error: partErr } = await db.from('tournament_players').insert(participants);
-  if (partErr) console.error('Participants error:', partErr);
-
-  // Generate matches
-  const playersInTournament = state.players.filter(p => selectedPlayers.has(p.id));
-  const matches = generateMatches(
-    playersInTournament,
-    tData.matches_per_player,
-    tData.partner_mode,
-    tData.opponent_mode,
-    tData.gender_mode,
-    tData.courts
-  );
-
-  console.log('Generated matches:', matches.length);
-
-  if (matches.length > 0) {
-    const matchData = matches.map(m => ({
-      tournament_id: t.id,
-      round: m.round,
-      court: m.court,
-      player1a_id: m.player1a_id,
-      player1b_id: m.player1b_id,
-      player2a_id: m.player2a_id,
-      player2b_id: m.player2b_id,
-    }));
-    const { error: matchErr } = await db.from('matches').insert(matchData);
-    if (matchErr) console.error('Matches error:', matchErr);
-  }
-
-  selectedPlayers.clear();
-  await loadTournaments();
-  closeModal();
-  msg(`Torneo creado con ${matches.length} partidos en ${tData.courts} pistas ✓`, 'success');
 }
 
 async function publishTournament(id) {
