@@ -641,12 +641,22 @@ function genderLabel(g) {
 }
 
 function partnerModeLabel(m) {
-  const labels = { fixed:'Compañero fijo', random:'Compañero aleatorio', balanced:'Compañero nivelado' };
+  const labels = {
+    fixed: 'Compañero fijo',
+    rotating_random: 'Rotativo aleatorio',
+    rotating_mixed: 'Rotativo nivelado mixto',
+    rotating_pure: 'Rotativo nivelado puro',
+  };
   return labels[m] || m;
 }
 
 function opponentModeLabel(m) {
-  const labels = { fixed:'Rivales fijos', random:'Rivales aleatorios', balanced:'Partidos nivelados' };
+  const labels = { random:'Rivales aleatorios', balanced:'Rivales nivelados' };
+  return labels[m] || m;
+}
+
+function genderModeLabel(m) {
+  const labels = { unisex:'Unisex', mixed:'Mixto' };
   return labels[m] || m;
 }
 
@@ -657,85 +667,227 @@ function msg(text, type='info') {
 }
 
 // =============================================
-// TOURNAMENT GENERATION LOGIC
+// TOURNAMENT GENERATION LOGIC v2
 // =============================================
-function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode) {
-  const n = players.length;
-  if (n < 4) return [];
-  
-  const matches = [];
-  const playCount = {};
-  players.forEach(p => playCount[p.id] = 0);
 
-  // Create pairs based on partner mode
-  function makePairs(shuffled) {
-    if (partnerMode === 'fixed') {
-      // Fixed pairs: 0+1, 2+3, etc.
-      const pairs = [];
-      for (let i = 0; i < shuffled.length - 1; i += 2) {
-        pairs.push([shuffled[i], shuffled[i+1]]);
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function teamAvgLevel(team) {
+  return (team[0].level + team[1].level) / 2;
+}
+
+// Form pairs according to partnerMode and genderMode
+// partnerMode: 'fixed' | 'rotating_random' | 'rotating_mixed' | 'rotating_pure'
+// genderMode: 'unisex' | 'mixed'
+// fixedPairs: pre-assigned pairs for 'fixed' mode (array of [p,p])
+function buildPairs(players, partnerMode, genderMode, fixedPairs) {
+  if (partnerMode === 'fixed') return [...fixedPairs];
+
+  let pool = shuffle(players);
+
+  if (genderMode === 'mixed') {
+    // Separate by gender
+    const females = pool.filter(p => p.gender === 'female');
+    const males = pool.filter(p => p.gender !== 'female');
+    const pairs = [];
+
+    // Pair each female with a male (mixed pair)
+    const usedMales = new Set();
+    const usedFemales = new Set();
+
+    females.forEach(f => {
+      if (usedFemales.has(f.id)) return;
+      const male = males.find(m => !usedMales.has(m.id));
+      if (male) {
+        pairs.push([f, male]);
+        usedFemales.add(f.id);
+        usedMales.add(male.id);
       }
-      return pairs;
-    } else if (partnerMode === 'balanced') {
-      // Balance by level: closest levels play together
-      const sorted = [...shuffled].sort((a,b) => a.level - b.level);
-      const pairs = [];
-      for (let i = 0; i < sorted.length - 1; i += 2) {
-        pairs.push([sorted[i], sorted[i+1]]);
-      }
-      return pairs;
-    } else {
-      // Random
-      const shuffledLocal = [...shuffled].sort(() => Math.random() - 0.5);
-      const pairs = [];
-      for (let i = 0; i < shuffledLocal.length - 1; i += 2) {
-        pairs.push([shuffledLocal[i], shuffledLocal[i+1]]);
-      }
-      return pairs;
+    });
+
+    // Remaining players (no mixed pair available) → pair among themselves
+    const remaining = pool.filter(p => !usedFemales.has(p.id) && !usedMales.has(p.id));
+    for (let i = 0; i + 1 < remaining.length; i += 2) {
+      pairs.push([remaining[i], remaining[i+1]]);
     }
+    return pairs;
   }
 
-  let round = 1;
-  let attempts = 0;
-  const maxMatches = Math.floor(n / 4) * matchesPerPlayer;
+  // Unisex modes
+  if (partnerMode === 'rotating_pure') {
+    // Best with best, worst with worst
+    const sorted = [...pool].sort((a, b) => b.level - a.level);
+    const pairs = [];
+    for (let i = 0; i + 1 < sorted.length; i += 2) pairs.push([sorted[i], sorted[i+1]]);
+    return pairs;
+  }
 
-  while (matches.length < maxMatches && attempts < 200) {
-    attempts++;
-    const shuffled = [...players].sort(() => Math.random() - 0.5);
-    const pairs = makePairs(shuffled);
-    
-    if (pairs.length < 2) break;
-    
-    // Create match between pair[0] vs pair[1]
-    for (let i = 0; i < pairs.length - 1; i += 2) {
-      if (matches.length >= maxMatches) break;
+  if (partnerMode === 'rotating_mixed') {
+    // Best with worst (compensated pairs)
+    const sorted = [...pool].sort((a, b) => b.level - a.level);
+    const pairs = [];
+    let lo = sorted.length - 1, hi = 0;
+    const used = new Set();
+    while (hi < lo) {
+      while (used.has(hi)) hi++;
+      while (used.has(lo)) lo--;
+      if (hi >= lo) break;
+      pairs.push([sorted[hi], sorted[lo]]);
+      used.add(hi); used.add(lo);
+      hi++; lo--;
+    }
+    return pairs;
+  }
+
+  // rotating_random: fully random
+  const pairs = [];
+  for (let i = 0; i + 1 < pool.length; i += 2) pairs.push([pool[i], pool[i+1]]);
+  return pairs;
+}
+
+function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, genderMode, courts) {
+  const n = players.length;
+  if (n < 4) return [];
+
+  const playCount = {};
+  const partnerCount = {}; // partnerCount[a][b] = times a and b were partners
+  const opponentCount = {}; // opponentCount[a][b] = times a and b were opponents
+
+  players.forEach(p => {
+    playCount[p.id] = 0;
+    partnerCount[p.id] = {};
+    opponentCount[p.id] = {};
+    players.forEach(q => {
+      partnerCount[p.id][q.id] = 0;
+      opponentCount[p.id][q.id] = 0;
+    });
+  });
+
+  // Build fixed pairs once if mode is fixed
+  let fixedPairs = [];
+  if (partnerMode === 'fixed') {
+    fixedPairs = buildPairs(players, 'rotating_random', genderMode, []);
+  }
+
+  const matches = [];
+  const totalTarget = Math.ceil(n / 4) * matchesPerPlayer;
+  let round = 1;
+  let stuckCount = 0;
+
+  while (stuckCount < 300) {
+    // Build pairs for this round
+    let pairs;
+    if (partnerMode === 'fixed') {
+      pairs = [...fixedPairs];
+    } else {
+      // For rotating modes, try to avoid repeating partners
+      let bestPairs = null;
+      let bestScore = Infinity;
+      for (let attempt = 0; attempt < 15; attempt++) {
+        const candidate = buildPairs(players, partnerMode, genderMode, fixedPairs);
+        const score = candidate.reduce((s, [a, b]) => s + (partnerCount[a.id][b.id] || 0), 0);
+        if (score < bestScore) { bestScore = score; bestPairs = candidate; }
+      }
+      pairs = bestPairs;
+    }
+
+    if (!pairs || pairs.length < 2) { stuckCount++; continue; }
+
+    // Match pairs against each other
+    const usedPairs = new Set();
+    let addedThisRound = 0;
+    let court = 1;
+
+    for (let i = 0; i < pairs.length; i++) {
+      if (usedPairs.has(i)) continue;
       const team1 = pairs[i];
-      const team2 = pairs[i+1];
-      
-      if (opponentMode === 'balanced') {
-        const t1avg = (team1[0].level + team1[1].level) / 2;
-        const t2avg = (team2[0].level + team2[1].level) / 2;
-        if (Math.abs(t1avg - t2avg) > 1.5) continue;
+
+      // Find best opponent pair
+      let bestJ = -1;
+      let bestOppScore = Infinity;
+
+      for (let j = i + 1; j < pairs.length; j++) {
+        if (usedPairs.has(j)) continue;
+        const team2 = pairs[j];
+
+        // Check none of the 4 players have played enough
+        const all4 = [...team1, ...team2];
+        if (all4.some(p => playCount[p.id] >= matchesPerPlayer)) continue;
+
+        // Score: prefer not repeating opponents, and balance levels if needed
+        let score = 0;
+        team1.forEach(a => team2.forEach(b => {
+          score += (opponentCount[a.id][b.id] || 0) * 10;
+        }));
+
+        if (opponentMode === 'balanced') {
+          const diff = Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2));
+          score += diff * 5;
+        }
+
+        // Mixed gender compensation: if one team has female and other doesn't, prefer lower level male
+        if (genderMode === 'mixed') {
+          const t1hasFemale = team1.some(p => p.gender === 'female');
+          const t2hasFemale = team2.some(p => p.gender === 'female');
+          if (t1hasFemale !== t2hasFemale) {
+            const mixedTeam = t1hasFemale ? team1 : team2;
+            const maleTeam = t1hasFemale ? team2 : team1;
+            const mixedAvg = teamAvgLevel(mixedTeam);
+            const maleAvg = teamAvgLevel(maleTeam);
+            // Penalize if male-only team is higher level (we want them 1 level lower)
+            if (maleAvg > mixedAvg - 0.5) score += (maleAvg - (mixedAvg - 1)) * 3;
+          }
+        }
+
+        if (score < bestOppScore) { bestOppScore = score; bestJ = j; }
       }
 
-      // Check play counts
-      const all4 = [...team1, ...team2];
-      const minPlays = Math.min(...all4.map(p => playCount[p.id]));
-      if (minPlays >= matchesPerPlayer) continue;
+      if (bestJ === -1) continue;
 
+      const team2 = pairs[bestJ];
+      usedPairs.add(i); usedPairs.add(bestJ);
+
+      const all4 = [...team1, ...team2];
       matches.push({
         round,
+        court: ((court - 1) % (courts || 4)) + 1,
         player1a_id: team1[0].id,
         player1b_id: team1[1].id,
         player2a_id: team2[0].id,
         player2b_id: team2[1].id,
-        _team1: team1,
-        _team2: team2,
       });
 
+      // Update counts
       all4.forEach(p => playCount[p.id]++);
+      partnerCount[team1[0].id][team1[1].id]++;
+      partnerCount[team1[1].id][team1[0].id]++;
+      partnerCount[team2[0].id][team2[1].id]++;
+      partnerCount[team2[1].id][team2[0].id]++;
+      team1.forEach(a => team2.forEach(b => {
+        opponentCount[a.id][b.id]++;
+        opponentCount[b.id][a.id]++;
+      }));
+
+      addedThisRound++;
+      court++;
     }
-    round++;
+
+    if (addedThisRound === 0) {
+      stuckCount++;
+    } else {
+      stuckCount = 0;
+      round++;
+    }
+
+    // Stop if everyone has played enough
+    if (players.every(p => playCount[p.id] >= matchesPerPlayer)) break;
   }
 
   return matches;
@@ -1073,9 +1225,13 @@ ${t.length === 0 ? `
     <span class="status-badge status-${tournament.status}">${tournament.status === 'draft' ? 'Borrador' : tournament.status === 'published' ? 'Publicado' : 'Finalizado'}</span>
   </div>
   <div class="tournament-meta">
-    <span class="meta-item"><span class="meta-icon">🎯</span>${tournament.matches_per_player} partido${tournament.matches_per_player!==1?'s':''}/jugador</span>
+    <span class="meta-item"><span class="meta-icon">🏟️</span>${tournament.courts || 4} pistas</span>
+    <span class="meta-item"><span class="meta-icon">⏱️</span>${tournament.minutes_per_match || 30} min/partido</span>
+    <span class="meta-item"><span class="meta-icon">🎯</span>${tournament.matches_per_player} partidos/jugador</span>
+    <span class="meta-item"><span class="meta-icon">🏆</span>Al ${tournament.game_format || 6}</span>
     <span class="meta-item"><span class="meta-icon">🤝</span>${partnerModeLabel(tournament.partner_mode)}</span>
     <span class="meta-item"><span class="meta-icon">⚔️</span>${opponentModeLabel(tournament.opponent_mode)}</span>
+    <span class="meta-item"><span class="meta-icon">👥</span>${genderModeLabel(tournament.gender_mode || 'unisex')}</span>
   </div>
   <div class="tournament-actions">
     <button class="btn btn-secondary btn-sm" onclick="openTournamentDetail('${tournament.id}')">Ver torneo</button>
@@ -1113,36 +1269,70 @@ function renderTournamentModal() {
     <input type="text" id="t-location" placeholder="Club Pádel Madrid" />
   </div>
 </div>
-<div class="field">
-  <label>Partidos por jugador: <strong id="matches-label">3</strong></label>
-  <input type="range" id="t-matches" min="1" max="8" value="3" oninput="document.getElementById('matches-label').textContent=this.value" style="width:100%;accent-color:var(--accent)" />
+<div class="row">
+  <div class="field">
+    <label>Nº de pistas: <strong id="courts-label">4</strong></label>
+    <input type="range" id="t-courts" min="1" max="12" value="4" oninput="document.getElementById('courts-label').textContent=this.value" style="width:100%;accent-color:var(--accent)" />
+  </div>
+  <div class="field">
+    <label>Partidos por jugador: <strong id="matches-label">3</strong></label>
+    <input type="range" id="t-matches" min="1" max="10" value="3" oninput="document.getElementById('matches-label').textContent=this.value" style="width:100%;accent-color:var(--accent)" />
+  </div>
 </div>
+
+<div class="row">
+  <div class="field">
+    <label>Tiempo por partido (min): <strong id="time-label">30</strong></label>
+    <input type="range" id="t-time" min="15" max="90" step="5" value="30" oninput="document.getElementById('time-label').textContent=this.value" style="width:100%;accent-color:var(--accent)" />
+  </div>
+  <div class="field">
+    <label>Formato de partido</label>
+    <div class="toggle-group" style="margin-top:6px">
+      <button class="toggle-btn active" data-format="6" onclick="selectFormat('6')">6 juegos</button>
+      <button class="toggle-btn" data-format="9" onclick="selectFormat('9')">9 juegos</button>
+    </div>
+    <input type="hidden" id="t-format" value="6" />
+  </div>
+</div>
+
+<div class="divider"></div>
+<div class="section-title">Tipo de torneo</div>
+<div class="toggle-group">
+  <button class="toggle-btn active" data-gender="unisex" onclick="selectGender('unisex')">🎾 Unisex</button>
+  <button class="toggle-btn" data-gender="mixed" onclick="selectGender('mixed')">👫 Mixto</button>
+</div>
+<input type="hidden" id="t-gender" value="unisex" />
 
 <div class="divider"></div>
 <div class="section-title">Modo de compañero</div>
 <div class="toggle-group">
-  <button class="toggle-btn active" data-partner="fixed" onclick="selectPartner('fixed')">Fijo</button>
-  <button class="toggle-btn" data-partner="random" onclick="selectPartner('random')">Aleatorio</button>
-  <button class="toggle-btn" data-partner="balanced" onclick="selectPartner('balanced')">Nivelado</button>
+  <button class="toggle-btn active" data-partner="fixed" onclick="selectPartner('fixed')">🔒 Fijo</button>
+  <button class="toggle-btn" data-partner="rotating_random" onclick="selectPartner('rotating_random')">🔀 Rotativo aleatorio</button>
+  <button class="toggle-btn" data-partner="rotating_mixed" onclick="selectPartner('rotating_mixed')">⚖️ Rotativo nivelado mixto</button>
+  <button class="toggle-btn" data-partner="rotating_pure" onclick="selectPartner('rotating_pure')">🏆 Rotativo nivelado puro</button>
 </div>
 <input type="hidden" id="t-partner" value="fixed" />
+<div id="partner-desc" style="color:var(--text2);font-size:12px;margin-top:8px">
+  Siempre el mismo compañero durante todo el torneo.
+</div>
 
 <div style="margin-top:16px" class="section-title">Modo de rivales</div>
 <div class="toggle-group">
-  <button class="toggle-btn active" data-opponent="fixed" onclick="selectOpponent('fixed')">Fijos</button>
-  <button class="toggle-btn" data-opponent="random" onclick="selectOpponent('random')">Aleatorios</button>
-  <button class="toggle-btn" data-opponent="balanced" onclick="selectOpponent('balanced')">Nivelados</button>
+  <button class="toggle-btn active" data-opponent="random" onclick="selectOpponent('random')">🎲 Aleatorios</button>
+  <button class="toggle-btn" data-opponent="balanced" onclick="selectOpponent('balanced')">⚖️ Nivelados</button>
 </div>
-<input type="hidden" id="t-opponent" value="fixed" />
+<input type="hidden" id="t-opponent" value="random" />
 
 <div class="divider"></div>
 <div class="section-title">Añadir jugadores (${state.players.length} disponibles)</div>
 ${state.players.length < 4 ? `
   <div class="alert alert-info">Necesitas al menos 4 jugadores. <button class="btn btn-ghost btn-sm" onclick="closeModal();goTo('players')">Ir a jugadores</button></div>
 ` : `
+  <div style="color:var(--text2);font-size:12px;margin-bottom:8px">Seleccionados: <strong id="sel-count" style="color:var(--accent)">0</strong></div>
   <div class="players-grid" style="margin-top:8px">
     ${state.players.map(p => `
     <div class="player-card" id="sel-${p.id}" onclick="togglePlayer('${p.id}')">
+      <span class="gender-badge ${p.gender}">${p.gender === 'female' ? '♀' : '♂'}</span>
       <div class="player-card-top">
         <div class="player-avatar">${initials(p.full_name)}</div>
         <div>
@@ -1169,16 +1359,37 @@ function togglePlayer(id) {
     selectedPlayers.add(id);
     document.getElementById('sel-'+id)?.classList.add('selected');
   }
+  const el = document.getElementById('sel-count');
+  if (el) el.textContent = selectedPlayers.size;
 }
+
+const partnerDescriptions = {
+  fixed: 'Siempre el mismo compañero durante todo el torneo.',
+  rotating_random: 'Cada partido con un compañero diferente, asignado al azar.',
+  rotating_mixed: 'Compañeros rotativos formando parejas compensadas (bueno con malo).',
+  rotating_pure: 'Compañeros rotativos agrupando niveles similares (buenos con buenos).',
+};
 
 function selectPartner(v) {
   document.getElementById('t-partner').value = v;
   document.querySelectorAll('[data-partner]').forEach(b => b.classList.toggle('active', b.dataset.partner === v));
+  const desc = document.getElementById('partner-desc');
+  if (desc) desc.textContent = partnerDescriptions[v] || '';
 }
 
 function selectOpponent(v) {
   document.getElementById('t-opponent').value = v;
   document.querySelectorAll('[data-opponent]').forEach(b => b.classList.toggle('active', b.dataset.opponent === v));
+}
+
+function selectGender(v) {
+  document.getElementById('t-gender').value = v;
+  document.querySelectorAll('[data-gender]').forEach(b => b.classList.toggle('active', b.dataset.gender === v));
+}
+
+function selectFormat(v) {
+  document.getElementById('t-format').value = v;
+  document.querySelectorAll('[data-format]').forEach(b => b.classList.toggle('active', b.dataset.format === v));
 }
 
 async function saveTournament() {
@@ -1192,8 +1403,12 @@ async function saveTournament() {
     scheduled_date: date,
     location: document.getElementById('t-location').value.trim() || null,
     matches_per_player: parseInt(document.getElementById('t-matches').value),
+    courts: parseInt(document.getElementById('t-courts').value),
+    minutes_per_match: parseInt(document.getElementById('t-time').value),
+    game_format: parseInt(document.getElementById('t-format').value),
     partner_mode: document.getElementById('t-partner').value,
     opponent_mode: document.getElementById('t-opponent').value,
+    gender_mode: document.getElementById('t-gender').value,
     owner_id: state.user.id,
   };
 
@@ -1206,12 +1421,20 @@ async function saveTournament() {
 
   // Generate matches
   const playersInTournament = state.players.filter(p => selectedPlayers.has(p.id));
-  const matches = generateMatches(playersInTournament, tData.matches_per_player, tData.partner_mode, tData.opponent_mode);
-  
+  const matches = generateMatches(
+    playersInTournament,
+    tData.matches_per_player,
+    tData.partner_mode,
+    tData.opponent_mode,
+    tData.gender_mode,
+    tData.courts
+  );
+
   if (matches.length > 0) {
     const matchData = matches.map(m => ({
       tournament_id: t.id,
       round: m.round,
+      court: m.court,
       player1a_id: m.player1a_id,
       player1b_id: m.player1b_id,
       player2a_id: m.player2a_id,
@@ -1223,7 +1446,7 @@ async function saveTournament() {
   selectedPlayers.clear();
   await loadTournaments();
   closeModal();
-  msg(`Torneo creado con ${matches.length} partidos ✓`, 'success');
+  msg(`Torneo creado con ${matches.length} partidos en ${tData.courts} pistas ✓`, 'success');
 }
 
 async function publishTournament(id) {
@@ -1290,7 +1513,10 @@ ${Object.keys(roundGroups).length === 0 ? `
     const t2won = m.winner_team === 2;
     return `
   <div class="match-card">
-    <div class="match-round">R${m.round}</div>
+    <div class="match-round">
+      <div>R${m.round}</div>
+      ${m.court ? `<div style="color:var(--accent);font-size:10px">P${m.court}</div>` : ''}
+    </div>
     <div class="match-teams">
       <div class="team">
         <div class="team-name ${t1won?'winner':''}">${playerName(m.player1a_id)}</div>
@@ -1304,9 +1530,9 @@ ${Object.keys(roundGroups).length === 0 ? `
     </div>
     ${tournament.status !== 'draft' ? `
     <div class="score-input">
-      <input type="number" id="s1-${m.id}" value="${m.score_team1??''}" placeholder="0" min="0" max="99" onchange="saveScore('${m.id}')" />
+      <input type="number" id="s1-${m.id}" value="${m.score_team1??''}" placeholder="0" min="0" max="${tournament.game_format||6}" onchange="saveScore('${m.id}')" />
       <span class="score-sep">-</span>
-      <input type="number" id="s2-${m.id}" value="${m.score_team2??''}" placeholder="0" min="0" max="99" onchange="saveScore('${m.id}')" />
+      <input type="number" id="s2-${m.id}" value="${m.score_team2??''}" placeholder="0" min="0" max="${tournament.game_format||6}" onchange="saveScore('${m.id}')" />
     </div>` : ''}
   </div>`;
   }).join('')}
