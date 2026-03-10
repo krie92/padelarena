@@ -951,13 +951,13 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
           score += (partnerCount[team2[0].id][team2[1].id]||0) * 5;
         }
         if (opponentMode === 'balanced') score += Math.abs(teamAvgLevel(team1) - teamAvgLevel(team2)) * 3;
-        // For fixed_pure: prefer same-category, penalize cross-category by level diff
         if (partnerMode === 'fixed_pure') {
           const cat1 = pairCategory[team1[0].id+'_'+team1[1].id] || pairCategory[team1[1].id+'_'+team1[0].id];
           const cat2 = pairCategory[team2[0].id+'_'+team2[1].id] || pairCategory[team2[1].id+'_'+team2[0].id];
           if (cat1 && cat2 && cat1 !== cat2) {
             const diff = Math.abs((team1[0].level+team1[1].level) - (team2[0].level+team2[1].level));
-            score += 50 + diff * 10; // penalize heavily but never block — fallback allowed
+            if (diff > 3) continue; // hard block — leave court empty instead
+            score += 50; // small diff cross-category: penalize but allow
           }
         }
         if (score < bestScore) { bestScore = score; bestJ = j; }
@@ -997,13 +997,6 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
     // Commit
     roundMatches.forEach(m => {
       matches.push(m);
-      // Warn if cross-category with big level diff
-      if (partnerMode === 'fixed_pure') {
-        const diff = Math.abs((m._team1[0].level+m._team1[1].level) - (m._team2[0].level+m._team2[1].level));
-        if (diff > 3) {
-          warnings.push(`R${m.round} P${m.court}: ${m._team1.map(p=>p.full_name).join('+')} (Nv.${m._team1[0].level+m._team1[1].level}) vs ${m._team2.map(p=>p.full_name).join('+')} (Nv.${m._team2[0].level+m._team2[1].level}) — diferencia de nivel ${diff}`);
-        }
-      }
       const all4 = [...m._team1, ...m._team2];
       all4.forEach(p => { playCount[p.id]++; courtCount[p.id][m.court] = (courtCount[p.id][m.court]||0)+1; });
       partnerCount[m._team1[0].id][m._team1[1].id]++;
@@ -1019,7 +1012,35 @@ function generateMatches(players, matchesPerPlayer, partnerMode, opponentMode, g
   }
 
   console.log('Play counts:', players.map(p => `${p.full_name}:${playCount[p.id]}`).join(', '));
-  if (warnings.length > 0) console.warn('Level mismatch warnings:', warnings);
+
+  // Warn about cross-category matches that did happen (diff ≤ 3 but still cross)
+  matches.forEach(m => {
+    if (partnerMode === 'fixed_pure') {
+      const t1 = [players.find(p=>p.id===m.player1a_id), players.find(p=>p.id===m.player1b_id)];
+      const t2 = [players.find(p=>p.id===m.player2a_id), players.find(p=>p.id===m.player2b_id)];
+      if (!t1[0]||!t1[1]||!t2[0]||!t2[1]) return;
+      const diff = Math.abs((t1[0].level+t1[1].level)-(t2[0].level+t2[1].level));
+      if (diff > 0) {
+        const cat1 = pairCategory[t1[0].id+'_'+t1[1].id]||pairCategory[t1[1].id+'_'+t1[0].id];
+        const cat2 = pairCategory[t2[0].id+'_'+t2[1].id]||pairCategory[t2[1].id+'_'+t2[0].id];
+        if (cat1 && cat2 && cat1 !== cat2) {
+          warnings.push(`R${m.round} P${m.court}: ${t1.map(p=>p.full_name).join('+')} (Nv.${t1[0].level+t1[1].level}) vs ${t2.map(p=>p.full_name).join('+')} (Nv.${t2[0].level+t2[1].level})`);
+        }
+      }
+    }
+  });
+
+  // Warn about pairs that couldn't reach minimum (blocked by level rules)
+  if (fixedPairs.length > 0) {
+    fixedPairs.forEach(pair => {
+      const plays = Math.min(playCount[pair[0].id], playCount[pair[1].id]);
+      if (plays < matchesPerPlayer) {
+        warnings.push(`⚠️ ${pair.map(p=>p.full_name).join('+')} solo pudo jugar ${plays}/${matchesPerPlayer} partidos — sin rivales de nivel similar disponibles`);
+      }
+    });
+  }
+
+  if (warnings.length > 0) console.warn('Warnings:', warnings);
   return { matches: matches.map(({ _team1, _team2, ...m }) => m), warnings };
 }
 
@@ -1172,7 +1193,7 @@ function renderApp() {
       <button class="nav-tab ${state.page==='stats'?'active':''}" onclick="goTo('stats')">Stats</button>
     </div>
     <div class="topbar-right">
-      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.4.2</span>
+      <span style="color:var(--text3);font-size:11px;letter-spacing:0.05em">v1.4.3</span>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()">Salir</button>
     </div>
   </div>
